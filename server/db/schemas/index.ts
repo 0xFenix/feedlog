@@ -30,6 +30,7 @@ export {
 } from './notifications'
 export type { NotificationPayload } from './notifications'
 export { memberPreference } from './member-preferences'
+export { mcpConsentOrganization, mcpAuditLog } from './mcp'
 export {
   organizationWidget,
   organizationWidgetRelations,
@@ -283,3 +284,5 @@ export const changelogReactionRelations = relations(changelogReaction, ({ one })
   user: one(user, { fields: [changelogReaction.userId], references: [user.id] }),
 }))
 export * from './scheduler'
+
+export * from './oauth'

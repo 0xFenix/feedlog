@@ -1,4 +1,5 @@
 import { createAuthClient } from 'better-auth/vue'
+import { oauthProviderClient } from '@better-auth/oauth-provider/client'
 import { adminClient, customSessionClient, organizationClient } from 'better-auth/client/plugins'
 import { ac, contributor, manager, owner } from '~~/shared/auth/permissions'
 import { promptLocalAuthIfRequired } from '~/composables/useLoginModal'
@@ -10,6 +11,7 @@ import type { auth } from '~~/server/utils/better-auth'
 // session payload.
 export const authClient = createAuthClient({
   plugins: [
+    oauthProviderClient(),
     adminClient(),
     organizationClient({ ac, roles: { owner, manager, contributor } }),
     customSessionClient<typeof auth>(),

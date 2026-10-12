@@ -46,7 +46,8 @@ export async function withHelpShortId<T>(insert: (shortId: string) => Promise<T>
       return await insert(generateHelpShortId())
     }
     catch (err) {
-      if ((err as { code?: string })?.code !== '23505') throw err
+      const error = err as { code?: string; cause?: { code?: string } }
+      if ((error.cause?.code ?? error.code) !== '23505') throw err
     }
   }
   throw createError({ statusCode: 500, message: 'Failed to generate article id' })

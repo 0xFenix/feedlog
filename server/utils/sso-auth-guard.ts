@@ -91,13 +91,14 @@ export async function guardSsoAuthRequest(event: H3Event, request: Request): Pro
 
   const isOrganization = rest.startsWith('organization/')
   const isAdmin = rest.startsWith('admin/')
+  const isOAuthProvider = rest.startsWith('oauth2/')
   const segment = rest.split(/[?/]/)[0] ?? ''
   const isGlobalIdentity = GLOBAL_IDENTITY_ENDPOINTS.has(segment)
   const isGetSession = segment === 'get-session'
 
   // Resolve the session only for paths that can be refused, so sign-in and
   // callbacks keep their current cost.
-  if (!isOrganization && !isAdmin && !isGlobalIdentity && !isGetSession) return false
+  if (!isOrganization && !isAdmin && !isOAuthProvider && !isGlobalIdentity && !isGetSession) return false
 
   const session = await auth.api.getSession({ headers: event.headers })
   const ssoOrgId = (session?.session as { ssoOrgId?: string | null } | undefined)?.ssoOrgId
@@ -118,7 +119,7 @@ export async function guardSsoAuthRequest(event: H3Event, request: Request): Pro
   }
 
   // The admin plugin judges by user.role, which has no notion of the current org.
-  if (isAdmin || isGlobalIdentity) throw localAuthRequired()
+  if (isAdmin || isGlobalIdentity || isOAuthProvider) throw localAuthRequired()
 
   const endpoint = rest.slice('organization/'.length).split(/[?/]/)[0] ?? ''
   if (!ORG_SCOPED_ORGANIZATION_ENDPOINTS.has(endpoint)) throw localAuthRequired()

@@ -1,4 +1,4 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import { pgTable, text, timestamp, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const user = pgTable("user", {
@@ -88,7 +88,15 @@ export const verification = pgTable(
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
   },
-  (table) => [index("verification_identifier_idx").on(table.identifier)],
+  (table) => [
+    index("verification_identifier_idx").on(table.identifier),
+    uniqueIndex('uq_mcp_request_identifier').on(table.identifier).where(sql`${table.identifier} LIKE 'mcp-request:%'`),
+    uniqueIndex('uq_mcp_request_pkce').on(
+      sql`(${table.value}::jsonb ->> 'userId')`,
+      sql`(${table.value}::jsonb ->> 'clientId')`,
+      sql`(${table.value}::jsonb ->> 'codeChallenge')`,
+    ).where(sql`${table.identifier} LIKE 'mcp-request:%'`),
+  ],
 );
 
 // Multi-tenant tables managed by better-auth organization plugin.

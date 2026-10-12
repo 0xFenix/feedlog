@@ -1,5 +1,6 @@
 import { createPostSchema } from '#layers/feedlog/shared/schemas/post'
-import { isActorAdmin } from '#layers/feedlog/shared/utils/notifications'
+import { contentTransaction } from '../../services/content-context'
+import { createFeedback } from '../../services/feedback'
 
 // POST /api/posts — Create a post (any authenticated user: end-user or staff).
 export default defineEventHandler(async (event) => {
@@ -8,21 +9,7 @@ export default defineEventHandler(async (event) => {
 
   const body = await readValidatedBody(event, createPostSchema.parse)
 
-  const created = await createPostRecord({
-    orgId,
-    authorId: session.user.id,
-    title: body.title,
-    content: body.content,
-    boardId: body.boardId,
-    subscribeAuthor: !isActorAdmin(session, orgId),
-  })
-
-  publishDomainEvent(event, createDomainEvent({
-    name: 'feedback.created',
-    orgId,
-    userId: session.user.id,
-    data: { feedbackId: created.id, boardId: created.boardId, source: 'portal', messageId: null },
-  }))
+  const created = await contentTransaction(event, orgId, session.user.id, context => createFeedback(context, body))
 
   const author = await fetchPostAuthor(session.user.id)
 
@@ -40,7 +27,7 @@ export default defineEventHandler(async (event) => {
     mergedTo: null,
     hasVoted: false,
     author: author ?? { id: session.user.id, name: null, image: null },
-    createdAt: created.createdAt,
-    updatedAt: created.updatedAt,
+    createdAt: created.createdAt.toISOString(),
+    updatedAt: created.updatedAt.toISOString(),
   } satisfies PostDetail
 })

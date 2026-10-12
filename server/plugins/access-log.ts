@@ -1,9 +1,7 @@
 import {
   getMethod,
-  getRequestIP,
   getRequestURL,
   getResponseStatus,
-  getHeader,
 } from 'h3'
 
 export default defineNitroPlugin((nitroApp) => {
@@ -17,7 +15,8 @@ export default defineNitroPlugin((nitroApp) => {
     const url = getRequestURL(event)
     const status = getResponseStatus(event)
 
-    console.log(`[access] ${method} ${url.pathname + url.search} ${status} ${duration}ms`)
+    const path = /^\/(?:api\/auth\/oauth2|api\/mcp|mcp)(?:\/|$)/.test(url.pathname) ? url.pathname : url.pathname + url.search
+    console.log(`[access] ${method} ${path} ${status} ${duration}ms`)
   })
 
   nitroApp.hooks.hook('error', (error, { event }) => {
@@ -25,8 +24,9 @@ export default defineNitroPlugin((nitroApp) => {
       ? Date.now() - (event.context?._startTime || Date.now())
       : 0
     const method = event ? getMethod(event) : '-'
-    const path = event?.path || '-'
-    const status = (error as any).statusCode || 500
+    const rawPath = event?.path || '-'
+    const path = /^\/(?:api\/auth\/oauth2|api\/mcp|mcp)(?:\/|\?|$)/.test(rawPath) ? rawPath.split('?')[0] : rawPath
+    const status = (error as { statusCode?: number }).statusCode || 500
 
     console.error(`[access] ${method} ${path} ${status} ${duration}ms - ${error.message}`)
   })

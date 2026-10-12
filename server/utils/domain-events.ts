@@ -50,7 +50,7 @@ export interface FeedLogDomainEventMap {
     boardId: string | null
     // Which entry point filed the feedback — a domain fact in its own right
     // (the post row does not record it). messageId is null for portal.
-    source: 'portal' | 'widget'
+    source: 'portal' | 'widget' | 'mcp'
     messageId: string | null
   }
 }

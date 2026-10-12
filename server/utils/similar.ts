@@ -114,6 +114,10 @@ export async function searchSimilarByPostId(
 ): Promise<SimilarPost[]> {
   const db = useDB()
 
+  const [source] = await db.select({ id: post.id }).from(post)
+    .where(and(eq(post.id, postId), eq(post.orgId, options.orgId))).limit(1)
+  if (!source) throw createError({ statusCode: 404, message: 'Feedback not found' })
+
   // Try embedding first
   if (isEmbeddingEnabled()) {
     const [emb] = await db

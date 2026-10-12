@@ -1,21 +1,9 @@
-import { and, eq } from 'drizzle-orm'
-import { helpArticle } from '#layers/feedlog/server/db/schemas'
+import { contentTransaction } from '#layers/feedlog/server/services/content-context'
+import { deleteArticle } from '#layers/feedlog/server/services/publishing'
 
-export default defineEventHandler(async (event) => {
-  const { orgId } = await requireOrgPermission(event, { feedlog: ['moderate'] })
-
-  const id = getRouterParam(event, 'id')!
-  const db = useDB()
-
-  const [deleted] = await db
-    .delete(helpArticle)
-    .where(and(eq(helpArticle.id, id), eq(helpArticle.orgId, orgId)))
-    .returning({ id: helpArticle.id })
-
-  if (!deleted) {
-    throw createError({ statusCode: 404, message: 'Article not found' })
-  }
-
+export default defineEventHandler(async event => {
+  const { session, orgId } = await requireOrgPermission(event, { feedlog: ['moderate'] })
+  await contentTransaction(event, orgId, session.user.id, context => deleteArticle(context, getRouterParam(event, 'id')!))
   setResponseStatus(event, 204)
   return null
 })

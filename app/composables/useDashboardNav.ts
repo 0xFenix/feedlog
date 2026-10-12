@@ -17,6 +17,8 @@ export interface DashboardNav {
 export function useDashboardNav(): DashboardNav {
   const { t } = useI18n()
   const { canModerate } = usePermission(computed(() => undefined), 'post')
+  const { data: authConfig } = useFetch('/api/auth-config', { key: 'dashboard-auth-config' })
+  const org = useOrgContext()
   return {
     mainNav: computed(() => [
       ...(canModerate.value ? [{ label: t('inbox.title'), to: '/dashboard/inbox', icon: 'lucide:inbox' }] : []),
@@ -33,6 +35,9 @@ export function useDashboardNav(): DashboardNav {
       { label: t('nav.members'),   to: '/dashboard/settings/members',    icon: 'lucide:users' },
       { label: t('nav.portal'),    to: '/dashboard/settings/portal',     icon: 'lucide:layout-template' },
       { label: t('nav.workspace'), to: '/dashboard/settings/workspace',  icon: 'lucide:building-2' },
+      ...(authConfig.value?.mcp && ['owner', 'manager', 'contributor'].includes(org.value.role ?? '')
+        ? [{ label: 'MCP', to: '/dashboard/mcp', icon: 'lucide:plug' }]
+        : []),
     ]),
     developerNav: computed(() => [
       { label: t('nav.sso'), to: '/dashboard/developer/sso', icon: 'lucide:key-round' },

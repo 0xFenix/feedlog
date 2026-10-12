@@ -1,0 +1,420 @@
+import assert from 'node:assert/strict'
+import { randomBytes, createHash } from 'node:crypto'
+import { test } from 'node:test'
+import { Pool } from 'pg'
+import { decodeJwt, SignJWT, generateKeyPair, exportJWK } from 'jose'
+import { uuidv7 } from 'uuidv7'
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
+
+interface ToolData { id: string; items: { id: string; parent_id?: string }[]; organizations: { id: string }[]; error?: { code: string }; next_cursor: string | null; [key: string]: unknown }
+
+const target = process.env.MCP_TEST_URL
+test('MCP: OAuth, multi-organization access and all business tools', { skip: !target, timeout: 180_000 }, async t => {
+  const origin = new URL(target!).origin
+  const database = new URL(process.env.MCP_TEST_DATABASE_URL!)
+  assert.ok(['localhost', '127.0.0.1'].includes(new URL(origin).hostname))
+  assert.ok(['localhost', '127.0.0.1'].includes(database.hostname))
+  assert.match(database.pathname, /mcp/, 'An isolated MCP database is required')
+  const pool = new Pool({ connectionString: database.href })
+  const prefix = 'mcp-' + randomBytes(6).toString('hex')
+  const password = randomBytes(24).toString('base64url')
+  const resource = origin + '/api/mcp'
+  const redirectUri = 'http://127.0.0.1:8765/callback'
+  const org = 'default-org'
+  const otherOrg = prefix + '-other'
+  const inaccessibleOrg = prefix + '-inaccessible'
+  const userIds: string[] = []
+  const clientIds: string[] = []
+  const contentIds = { feedback: [] as string[], boards: [] as string[], articles: [] as string[], collections: [] as string[], changelogs: [] as string[] }
+  const seen = new Set<string>()
+  let cookie = ''
+  let userId = ''
+  let sdk: Client | undefined
+
+  async function request(path: string, body?: unknown, headers: Record<string, string> = {}, method?: string) {
+    return fetch(origin + path, { method: method ?? (body === undefined ? 'GET' : 'POST'), redirect: 'manual', signal: AbortSignal.timeout(15_000),
+      headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
+      body: body === undefined ? undefined : JSON.stringify(body) })
+  }
+  async function ok(response: Response, status = 200) {
+    const body = await response.json().catch(() => null)
+    assert.equal(response.status, status, response.status === status ? undefined : JSON.stringify(body))
+    return body
+  }
+  async function signup(name: string) {
+    const response = await request('/api/auth/sign-up/email', { name, email: name + '@example.invalid', password }, { origin })
+    const data = await ok(response)
+    userIds.push(data.user.id)
+    assert.equal((await pool.query('SELECT id FROM "user" WHERE id=$1', [data.user.id])).rowCount, 1, 'Server and test must use the same isolated database')
+    return { userId: data.user.id as string, cookie: response.headers.getSetCookie().map(v => v.split(';')[0]).join('; '), token: data.token as string }
+  }
+  async function register() {
+    const client = await ok(await request('/api/auth/oauth2/register', {
+      client_name: 'Claude Code ' + prefix, redirect_uris: [redirectUri],
+      token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], scope: 'mcp:access offline_access',
+    }), 201)
+    clientIds.push(client.client_id)
+    return client as { client_id: string }
+  }
+  async function begin(clientId: string, loginCookie = cookie) {
+    const verifier = randomBytes(32).toString('base64url')
+    const params = new URLSearchParams({ client_id: clientId, response_type: 'code', redirect_uri: redirectUri, resource, scope: 'mcp:access offline_access',
+      state: randomBytes(16).toString('hex'), code_challenge_method: 'S256', code_challenge: createHash('sha256').update(verifier).digest('base64url') })
+    const response = await ok(await request('/api/auth/oauth2/authorize?' + params, undefined, { cookie: loginCookie }))
+    const page = new URL(response.url, origin)
+    assert.equal(page.pathname, '/mcp/consent', 'Every authorization must show organization selection')
+    const oauthQuery = page.search.slice(1)
+    const context = await ok(await request('/api/mcp/consent-context?' + new URLSearchParams({ oauth_query: oauthQuery }), undefined, { cookie: loginCookie }))
+    return { verifier, context, oauthQuery, state: params.get('state') }
+  }
+  async function consent(pending: Awaited<ReturnType<typeof begin>>, organizations: string[], accept = true, loginCookie = cookie) {
+    const response = await ok(await request('/api/mcp/consent', {
+      authorizationRequestId: pending.context.authorizationRequestId, expectedUserId: pending.context.user.id, accept, organizationIds: organizations,
+    }, { origin, cookie: loginCookie }))
+    const url = new URL(response.redirectUrl)
+    assert.equal(url.searchParams.get('state'), pending.state)
+    return { code: url.searchParams.get('code')!, verifier: pending.verifier, error: url.searchParams.get('error') }
+  }
+  async function token(values: Record<string, string>, headers: Record<string, string> = {}) {
+    return fetch(origin + '/api/auth/oauth2/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers }, body: new URLSearchParams(values) })
+  }
+  const exchange = (clientId: string, grant: { code: string; verifier: string }) => token({ grant_type: 'authorization_code', client_id: clientId, code: grant.code, code_verifier: grant.verifier, redirect_uri: redirectUri, resource })
+  async function connect(accessToken: string, version: '2026-07-28' | '2025-06-18' = '2026-07-28') {
+    const client = new Client({ name: 'feedlog-integration', version: '1.0.0' }, { versionNegotiation: { mode: version === '2026-07-28' ? { pin: version } : 'legacy' } })
+    await client.connect(new StreamableHTTPClientTransport(new URL(resource), { requestInit: { headers: { Authorization: 'Bearer ' + accessToken } } }))
+    return client
+  }
+  async function call(name: string, args: Record<string, unknown> = {}, errorCode?: string) {
+    seen.add(name)
+    const response = await sdk!.callTool({ name, arguments: name === 'list_organizations' ? args : { organization_id: org, ...args } })
+    const data = response.structuredContent as ToolData
+    if (errorCode) { assert.equal(response.isError, true, name); assert.equal(data?.error?.code, errorCode, JSON.stringify(response)); return data }
+    assert.equal(response.isError, undefined, name + ': ' + JSON.stringify(response))
+    assert.deepEqual(JSON.parse((response.content as { text: string }[])[0]!.text), data)
+    return data
+  }
+  try {
+    const owner = await signup(prefix + '-owner')
+    userId = owner.userId; cookie = owner.cookie
+    await pool.query('INSERT INTO organization(id,name,slug,metadata) VALUES($1,$1,$1,$2) ON CONFLICT(id) DO NOTHING', [org, JSON.stringify({ portalModules: { helpCenter: true } })])
+    await pool.query('UPDATE organization SET metadata=$1 WHERE id=$2', [JSON.stringify({ portalModules: { helpCenter: true } }), org])
+    for (const id of [otherOrg, inaccessibleOrg]) await pool.query('INSERT INTO organization(id,name,slug) VALUES($1,$1,$1)', [id])
+    for (const id of [org, otherOrg]) await pool.query('INSERT INTO member(id,organization_id,user_id,role) VALUES($1,$2,$3,$4)', [uuidv7(), id, userId, 'owner'])
+    const other = await signup(prefix + '-member')
+    await pool.query('INSERT INTO member(id,organization_id,user_id,role) VALUES($1,$2,$3,$4)', [uuidv7(), org, other.userId, 'contributor'])
+    await pool.query('INSERT INTO verification(id,identifier,value,expires_at) VALUES($1,$1,$2,now()+interval \'10 minutes\')', [prefix + '-plain-verification', 'not-json'])
+
+    await t.test('existing organization permissions and invitation flow', async () => {
+      const permissions = await ok(await request('/api/auth/organization/has-permission', { organizationId: org, permissions: { feedlog: ['moderate'] } }, { cookie, origin }))
+      assert.equal(permissions.success, true)
+      const invitation = await ok(await request('/api/auth/organization/invite-member', { organizationId: org, email: prefix + '-invite@example.invalid', role: 'contributor' }, { cookie, origin }))
+      await ok(await request('/api/auth/organization/cancel-invitation', { invitationId: invitation.id }, { cookie, origin }))
+      await pool.query('DELETE FROM invitation WHERE id=$1', [invitation.id])
+    })
+
+    await t.test('discovery, session rejection and Origin validation', async () => {
+      const metadata = await ok(await request('/.well-known/oauth-protected-resource/api/mcp'))
+      assert.equal(metadata.resource, resource)
+      assert.deepEqual(metadata.authorization_servers, [origin + '/api/auth'])
+      assert.ok(metadata.scopes_supported.includes('mcp:access'))
+      for (const headers of [{ cookie }, { authorization: 'Bearer ' + owner.token }, { authorization: 'Bearer invalid' }]) {
+        const response = await request('/api/mcp', {}, headers)
+        assert.equal(response.status, 401, await response.text())
+        assert.match(response.headers.get('www-authenticate')!, /resource_metadata=/)
+      }
+      assert.equal((await request('/api/mcp', {}, { origin: 'https://untrusted.invalid' })).status, 403)
+      assert.equal((await request('/api/mcp')).status, 405)
+      assert.equal((await request('/api/auth/oauth2/register', { redirect_uris: [redirectUri], scope: 'admin:all' })).status, 400)
+    })
+    const registered = await register()
+    await t.test('signed context, denial, direct plugin bypass and account binding', async () => {
+      const pending = await begin(registered.client_id)
+      assert.deepEqual(pending.context.selectedOrganizationIds, [])
+      assert.equal(pending.context.client.type, 'claude-code')
+      const forged = new URLSearchParams(pending.oauthQuery); forged.set('client_id', 'forged')
+      assert.equal((await request('/api/mcp/consent-context?' + new URLSearchParams({ oauth_query: forged.toString() }), undefined, { cookie })).status, 400)
+      assert.equal((await request('/api/auth/oauth2/consent', { accept: true, oauth_query: pending.oauthQuery }, { cookie, origin })).status, 403)
+      assert.equal((await request('/api/mcp/consent', { authorizationRequestId: pending.context.authorizationRequestId, expectedUserId: other.userId, accept: true, organizationIds: [org] }, { cookie, origin })).status, 409)
+      const denied = await consent(pending, [], false)
+      assert.equal(denied.error, 'access_denied')
+      assert.equal((await request('/api/mcp/consent', { authorizationRequestId: pending.context.authorizationRequestId, expectedUserId: userId, accept: true, organizationIds: [org] }, { cookie, origin })).status, 400)
+    })
+    const grant = await consent(await begin(registered.client_id), [org, otherOrg])
+    const tokens = await ok(await exchange(registered.client_id, grant))
+    const claims = decodeJwt(tokens.access_token)
+    const consentId = claims.mcp_consent_id as string
+    assert.ok(consentId); assert.equal(claims.sub, userId); assert.equal(claims.aud, resource)
+    assert.ok(claims.exp! - claims.iat! <= 900)
+    sdk = await connect(tokens.access_token)
+    const tools = (await sdk.listTools()).tools
+    assert.equal(tools.length, 35)
+    const legacy = await connect(tokens.access_token, '2025-06-18')
+    assert.equal((await legacy.listTools()).tools.length, 35)
+    await legacy.close()
+    await t.test('authorized organizations, complete compact list and membership isolation', async () => {
+      assert.deepEqual((await call('list_organizations')).organizations.map((x: { id: string }) => x.id).sort(), [org, otherOrg].sort())
+      await call('list_boards', { organization_id: inaccessibleOrg }, 'FORBIDDEN')
+      const listing = await ok(await request('/api/mcp/connections', undefined, { cookie }))
+      assert.equal(listing.items[0].id, consentId)
+      assert.equal(listing.items[0].isOwn, true)
+      assert.equal(listing.items[0].actions.manageOrganizations, true)
+      assert.equal(listing.items[0].organizationIds, undefined)
+      assert.equal(listing.items[0].lastUsedAt, null)
+    })
+    let first = '', second = '', third = '', boardId = ''
+    await t.test('boards, feedback CRUD, microsecond cursor and cross-organization validation', async () => {
+      boardId = (await call('create_board', { name: prefix + ' Board', description: 'Integration board' })).id
+      contentIds.boards.push(boardId)
+      await call('update_board', { board_id: boardId, name: prefix + ' Updated' })
+      assert.ok((await call('list_boards')).items.some((x: { id: string }) => x.id === boardId))
+      for (const title of ['First', 'Second', 'Third']) {
+        const record = await call('create_feedback', { title: prefix + ' ' + title, content: 'Markdown **feedback** for integration testing.', board_id: boardId })
+        contentIds.feedback.push(record.id)
+      }
+      ;[first, second, third] = contentIds.feedback
+      await pool.query('UPDATE post SET created_at=$1 WHERE id=$2', ['2099-01-01T00:00:00.000456Z', first])
+      await pool.query('UPDATE post SET created_at=$1 WHERE id=$2', ['2099-01-01T00:00:00.000123Z', second])
+      const page = await call('list_feedback', { limit: 1, query: prefix })
+      assert.equal(page.items[0].id, first)
+      const next = await call('list_feedback', { limit: 1, query: prefix, cursor: page.next_cursor })
+      assert.equal(next.items[0].id, second)
+      await call('list_feedback', { limit: 1, query: 'different', cursor: page.next_cursor }, 'INVALID_CURSOR')
+      await call('update_feedback', { feedback_id: first, status: 'planned', title: prefix + ' Revised' })
+      assert.equal((await call('get_feedback', { feedback_id: first })).status, 'planned')
+      await call('get_feedback', { organization_id: otherOrg, feedback_id: first }, 'NOT_FOUND')
+      await call('create_feedback', { organization_id: otherOrg, title: 'Invalid board', content: 'Must not persist', board_id: boardId }, 'NOT_FOUND')
+      await call('find_similar_feedback', { feedback_id: first })
+      await call('find_similar_feedback', { title: prefix, content: 'Markdown feedback', limit: 3 })
+      await call('find_similar_feedback', { organization_id: otherOrg, feedback_id: first }, 'NOT_FOUND')
+      await call('update_feedback', { feedback_id: first }, 'INVALID_ARGUMENT')
+      await call('create_feedback_comment', { feedback_id: first, content: ' ' }, 'INVALID_ARGUMENT')
+    })
+    await t.test('comments, author-only editing, replies and counter cleanup', async () => {
+      const parent = await call('create_feedback_comment', { feedback_id: first, content: 'A public reply.', notify_voters: false })
+      const reply = await call('create_feedback_comment', { feedback_id: first, content: 'A nested reply.', parent_id: parent.id })
+      await call('update_feedback_comment', { comment_id: parent.id, content: 'Updated public reply.' })
+      const comments = await call('list_feedback_comments', { feedback_id: first })
+      assert.equal(comments.items.length, 2)
+      assert.equal((comments.items[0] as Record<string, unknown>).feedback_id, first)
+      assert.equal((comments.items[0] as Record<string, unknown>).post_id, undefined)
+      assert.equal(comments.items.find((x: { id: string }) => x.id === reply.id).parent_id, parent.id)
+      const likes = await Promise.all([1, 2].map(() => request('/api/comments/' + parent.id + '/like', {}, { cookie: other.cookie, origin })))
+      for (const response of likes) assert.equal((await ok(response)).likeCount, 1)
+      const anotherPerson = await ok(await request('/api/posts/' + first + '/comments', { content: 'Another person wrote this.' }, { cookie: other.cookie, origin }), 201)
+      await call('update_feedback_comment', { comment_id: anotherPerson.id, content: 'Must not rewrite another author' }, 'FORBIDDEN')
+      await call('delete_feedback_comment', { comment_id: anotherPerson.id })
+      await call('create_feedback_comment', { feedback_id: second, parent_id: parent.id, content: 'Wrong thread' }, 'NOT_FOUND')
+      const [, racingLike] = await Promise.all([
+        call('delete_feedback_comment', { comment_id: parent.id }),
+        request('/api/comments/' + parent.id + '/like', {}, { cookie: other.cookie, origin }),
+      ])
+      assert.ok([200, 404].includes(racingLike.status))
+      assert.equal((await pool.query('SELECT * FROM comment_like WHERE comment_id=$1', [parent.id])).rowCount, 0)
+      assert.equal((await call('get_feedback', { feedback_id: first })).comment_count, 0)
+    })
+    await t.test('merge, reparent and nested unmerge keep vote and comment counts correct', async () => {
+      const votes = await Promise.all([1, 2].map(() => request('/api/posts/' + first + '/vote', {}, { cookie, origin })))
+      for (const response of votes) assert.equal((await ok(response)).voteCount, 1)
+      for (const [id, voter] of [[first, userId], [second, userId], [second, other.userId], [third, other.userId]]) await pool.query('INSERT INTO vote(post_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [id, voter])
+      await call('merge_feedback', { source_feedback_id: second, target_feedback_id: first })
+      assert.equal((await call('get_feedback', { feedback_id: first })).vote_count, 2)
+      await call('merge_feedback', { source_feedback_id: second, target_feedback_id: third })
+      assert.equal((await call('get_feedback', { feedback_id: first })).vote_count, 1)
+      assert.equal((await call('get_feedback', { feedback_id: first })).comment_count, 0)
+      await call('merge_feedback', { source_feedback_id: third, target_feedback_id: first })
+      await call('unmerge_feedback', { feedback_id: second })
+      assert.equal((await call('get_feedback', { feedback_id: first })).vote_count, 2)
+      await call('delete_feedback', { feedback_id: first }, 'INVALID_ARGUMENT')
+      await call('unmerge_feedback', { feedback_id: third })
+      await call('delete_board', { board_id: boardId })
+      assert.equal((await call('get_feedback', { feedback_id: first })).board_id, null)
+    })
+    await t.test('help collection and article lifecycle, public visibility and AI Usage', async () => {
+      const previousSettings = await call('get_portal_settings')
+      assert.equal(previousSettings.help_center_enabled, true)
+      assert.equal((await call('get_portal_settings', { organization_id: otherOrg })).help_center_enabled, false)
+      await call('get_portal_settings', { organization_id: inaccessibleOrg }, 'FORBIDDEN')
+      await call('update_portal_settings', { organization_id: otherOrg, help_center_enabled: true }, 'INVALID_ARGUMENT')
+      const collection = await call('create_help_collection', { name: prefix + ' Docs', icon: 'book-open' })
+      contentIds.collections.push(collection.id)
+      const [{ metadata: previousMetadata }] = (await pool.query('SELECT metadata FROM organization WHERE id=$1', [org])).rows
+      assert.equal((await call('update_portal_settings', { help_center_enabled: false })).help_center_enabled, false)
+      assert.equal((await call('get_portal_settings')).help_center_enabled, false)
+      await call('update_portal_settings', { help_center_enabled: true })
+      const [{ metadata: restoredMetadata }] = (await pool.query('SELECT metadata FROM organization WHERE id=$1', [org])).rows
+      assert.deepEqual(JSON.parse(restoredMetadata), JSON.parse(previousMetadata))
+      await call('update_help_collection', { collection_id: collection.id, description: 'Integration documentation' })
+      assert.ok((await call('list_help_collections')).items.some((x: { id: string }) => x.id === collection.id))
+      const article = await call('create_help_article', { collection_id: collection.id, title: 'Integration guide', content: '# Setup\nOriginal body', ai_enabled: false })
+      contentIds.articles.push(article.id)
+      assert.equal(article.status, 'draft'); assert.equal(article.ai_enabled, false)
+      await call('get_help_article', { article_id: article.id, view: 'public' }, 'NOT_FOUND')
+      await call('update_help_article', { article_id: article.id, content: '# Setup\nUpdated body' })
+      assert.equal((await call('list_help_articles', { query: 'Updated body' })).items[0].id, article.id)
+      await call('publish_help_article', { article_id: article.id })
+      assert.equal((await call('get_help_article', { article_id: article.id, view: 'public' })).publicly_visible, true)
+      await call('update_help_collection', { collection_id: collection.id, visible: false })
+      await call('get_help_article', { article_id: article.id, view: 'public' }, 'NOT_FOUND')
+      assert.equal((await call('get_help_article', { article_id: article.id })).status, 'published')
+      await call('unpublish_help_article', { article_id: article.id })
+      assert.equal((await call('get_help_article', { article_id: article.id })).status, 'archived')
+      await call('delete_help_article', { article_id: article.id })
+    })
+    await t.test('changelog drafts and published snapshots, scoped deletion', async () => {
+      const changelog = await call('create_changelog', { title: prefix + ' Release', content: 'Original release notes.', categories: ['new'] })
+      contentIds.changelogs.push(changelog.id)
+      await call('publish_changelog', { changelog_id: changelog.id })
+      await call('update_changelog', { changelog_id: changelog.id, content: 'Edited release notes.' })
+      const edited = await call('get_changelog', { changelog_id: changelog.id })
+      assert.equal(edited.status, 'needs_update'); assert.equal(edited.published_content, 'Original release notes.')
+      assert.equal((await call('list_changelogs', { query: prefix })).items[0].id, changelog.id)
+      await pool.query('INSERT INTO changelog_reaction(changelog_id,user_id,emoji) VALUES($1,$2,$3)', [changelog.id, userId, 'like'])
+      await call('delete_changelog', { organization_id: otherOrg, changelog_id: changelog.id }, 'NOT_FOUND')
+      assert.equal((await pool.query('SELECT * FROM changelog_reaction WHERE changelog_id=$1', [changelog.id])).rowCount, 1)
+      await call('delete_changelog', { changelog_id: changelog.id })
+    })
+    await t.test('live role changes and consent audit records', async () => {
+      await pool.query('UPDATE member SET role=$1 WHERE user_id=$2 AND organization_id=$3', ['contributor', userId, org])
+      await call('update_feedback', { feedback_id: first, title: prefix + ' Author edit' })
+      await call('update_feedback', { feedback_id: first, status: 'done' }, 'FORBIDDEN')
+      await call('create_board', { name: 'Not allowed' }, 'FORBIDDEN')
+      assert.equal((await call('get_portal_settings')).help_center_enabled, true)
+      await call('update_portal_settings', { help_center_enabled: false }, 'FORBIDDEN')
+      await pool.query('UPDATE member SET role=$1 WHERE user_id=$2 AND organization_id=$3', ['owner', userId, org])
+      for (const id of [first, second, third]) await call('delete_feedback', { feedback_id: id })
+      const audit = await pool.query('SELECT operation,status,details FROM mcp_audit_log WHERE consent_id=$1', [consentId])
+      assert.ok(audit.rows.some(row => row.operation === 'create_feedback' && row.status === 'success'))
+      assert.ok(audit.rows.some(row => row.operation === 'create_board' && row.status === 'failure'))
+      const listing = await ok(await request('/api/mcp/connections', undefined, { cookie }))
+      assert.ok(listing.items.find((x: { id: string }) => x.id === consentId).lastUsedAt)
+      assert.equal(seen.size, 35, 'Exercise every tool')
+    })
+    await t.test('a failed audit rolls back the business write and records failure', async () => {
+      await pool.query("ALTER TABLE mcp_audit_log ADD CONSTRAINT mcp_test_rollback CHECK (operation <> 'create_board' OR status <> 'success') NOT VALID")
+      try {
+        await call('create_board', { name: prefix + '-rollback' }, 'WRITE_RESULT_UNKNOWN')
+        assert.equal((await pool.query('SELECT id FROM board WHERE name=$1', [prefix + '-rollback'])).rowCount, 0)
+        assert.ok((await pool.query("SELECT id FROM mcp_audit_log WHERE consent_id=$1 AND operation='create_board' AND status='failure'", [consentId])).rowCount)
+      } finally { await pool.query('ALTER TABLE mcp_audit_log DROP CONSTRAINT mcp_test_rollback') }
+    })
+    await t.test('DPoP binding and proof replay are enforced with provider keys', async () => {
+      const key = await generateKeyPair('ES256')
+      const jwk = await exportJWK(key.publicKey)
+      const proof = (url: string, accessToken?: string) => new SignJWT({ htu: url, htm: 'POST', jti: randomBytes(16).toString('hex'), ...(accessToken ? { ath: createHash('sha256').update(accessToken).digest('base64url') } : {}) })
+        .setProtectedHeader({ typ: 'dpop+jwt', alg: 'ES256', jwk }).setIssuedAt().sign(key.privateKey)
+      const pending = await consent(await begin(registered.client_id), [org, otherOrg])
+      const issued = await ok(await token({ grant_type: 'authorization_code', client_id: registered.client_id, code: pending.code, code_verifier: pending.verifier, redirect_uri: redirectUri, resource }, { DPoP: await proof(origin + '/api/auth/oauth2/token') }))
+      assert.ok(decodeJwt(issued.access_token).cnf)
+      assert.equal((await request('/api/mcp', {}, { authorization: 'Bearer ' + issued.access_token })).status, 401)
+      const headers = { authorization: 'DPoP ' + issued.access_token, DPoP: await proof(resource, issued.access_token), accept: 'application/json, text/event-stream' }
+      const initialize = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'dpop-test', version: '1.0' } } }
+      assert.equal((await request('/api/mcp', initialize, headers)).status, 200)
+      assert.equal((await request('/api/mcp', initialize, headers)).status, 401)
+    })
+    await t.test('removing membership while adding its organization cannot leave a usable grant', async () => {
+      const membershipId = uuidv7()
+      await pool.query('INSERT INTO member(id,user_id,organization_id,role) VALUES($1,$2,$3,$4)', [membershipId, userId, inaccessibleOrg, 'contributor'])
+      const connection = await pool.connect()
+      try {
+        await connection.query('BEGIN')
+        await connection.query('DELETE FROM member WHERE id=$1', [membershipId])
+        const change = request('/api/mcp/connections/' + consentId + '/organizations', { addOrganizationIds: [inaccessibleOrg], removeOrganizationIds: [otherOrg] }, { cookie, origin }, 'PATCH')
+        for (let attempt = 0; attempt < 40; attempt++) {
+          const waiting = await pool.query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%member%'")
+          if (waiting.rowCount) break
+          await new Promise(resolve => setTimeout(resolve, 25))
+        }
+        await connection.query('COMMIT')
+        assert.equal((await change).status, 403)
+        assert.equal((await pool.query('SELECT * FROM mcp_consent_organization WHERE member_id=$1', [membershipId])).rowCount, 0)
+        assert.ok((await call('list_organizations')).organizations.some(item => item.id === otherOrg), 'A failed delta must not partially remove another organization')
+      } finally { await connection.query('ROLLBACK'); connection.release() }
+    })
+    await t.test('organization deltas, administrator revocation, refresh and stale credentials', async () => {
+      const otherGrant = await consent(await begin(registered.client_id, other.cookie), [org], true, other.cookie)
+      const otherTokens = await ok(await exchange(registered.client_id, otherGrant))
+      const otherConsentId = decodeJwt(otherTokens.access_token).mcp_consent_id as string
+      assert.equal((await request('/api/mcp/connections/' + consentId + '/organizations', undefined, { cookie: other.cookie })).status, 403)
+      const revoked = await ok(await request('/api/mcp/connections/' + otherConsentId + '/organizations/' + org, undefined, { cookie, origin }, 'DELETE'))
+      assert.equal(revoked.disconnected, true)
+      assert.equal((await request('/api/mcp', {}, { authorization: 'Bearer ' + otherTokens.access_token })).status, 401)
+      const reconnectedOther = await ok(await exchange(registered.client_id, await consent(await begin(registered.client_id, other.cookie), [org], true, other.cookie)))
+      const otherMembership = (await pool.query('SELECT id FROM member WHERE user_id=$1 AND organization_id=$2', [other.userId, org])).rows[0]
+      await ok(await request('/api/auth/organization/remove-member', { organizationId: org, memberIdOrEmail: otherMembership.id }, { cookie, origin }))
+      const removedConsent = decodeJwt(reconnectedOther.access_token).mcp_consent_id
+      assert.equal((await pool.query('SELECT id FROM oauth_consent WHERE id=$1', [removedConsent])).rowCount, 0)
+      assert.equal((await pool.query('SELECT * FROM mcp_consent_organization WHERE consent_id=$1', [removedConsent])).rowCount, 0)
+      await pool.query('INSERT INTO member(id,user_id,organization_id,role) VALUES($1,$2,$3,$4)', [uuidv7(), other.userId, org, 'contributor'])
+      assert.equal((await request('/api/mcp', {}, { authorization: 'Bearer ' + reconnectedOther.access_token })).status, 401)
+      const pending = await begin(registered.client_id)
+      assert.deepEqual([...pending.context.selectedOrganizationIds].sort(), [org, otherOrg].sort())
+      await ok(await request('/api/mcp/connections/' + consentId + '/organizations', { removeOrganizationIds: [otherOrg] }, { cookie, origin }, 'PATCH'))
+      assert.equal((await request('/api/mcp/consent', { authorizationRequestId: pending.context.authorizationRequestId, expectedUserId: userId, accept: true, organizationIds: [org, otherOrg] }, { cookie, origin })).status, 409)
+      await call('list_boards', { organization_id: otherOrg }, 'FORBIDDEN')
+      await ok(await request('/api/mcp/connections/' + consentId + '/organizations', { addOrganizationIds: [otherOrg] }, { cookie, origin }, 'PATCH'))
+      const refresh = await ok(await token({ grant_type: 'refresh_token', client_id: registered.client_id, refresh_token: tokens.refresh_token, resource }))
+      assert.ok(refresh.refresh_token)
+      const staleCode = await consent(await begin(registered.client_id), [org, otherOrg])
+      assert.equal((await request('/api/mcp/connections/' + consentId, undefined, { cookie, origin }, 'DELETE')).status, 204)
+      assert.equal((await request('/api/mcp', {}, { authorization: 'Bearer ' + tokens.access_token })).status, 401)
+      assert.notEqual((await token({ grant_type: 'refresh_token', client_id: registered.client_id, refresh_token: tokens.refresh_token, resource })).status, 200)
+      const renewed = await ok(await exchange(registered.client_id, await consent(await begin(registered.client_id), [org])))
+      assert.notEqual(decodeJwt(renewed.access_token).mcp_consent_id, consentId)
+      assert.notEqual((await exchange(registered.client_id, staleCode)).status, 200)
+      assert.equal((await request('/api/mcp', {}, { authorization: 'Bearer ' + refresh.access_token })).status, 401)
+      const membership = (await pool.query('SELECT id FROM member WHERE user_id=$1 AND organization_id=$2', [userId, org])).rows[0]
+      await pool.query('DELETE FROM member WHERE id=$1', [membership.id])
+      await pool.query('INSERT INTO member(id,user_id,organization_id,role) VALUES($1,$2,$3,$4)', [uuidv7(), userId, org, 'owner'])
+      assert.equal((await request('/api/mcp', {}, { authorization: 'Bearer ' + renewed.access_token })).status, 401, 'Rejoining must not restore old access')
+      const expiredConnection = decodeJwt(renewed.access_token).mcp_consent_id as string
+      assert.equal((await request('/api/mcp/connections/' + expiredConnection + '/organizations', { addOrganizationIds: [org] }, { cookie, origin }, 'PATCH')).status, 404, 'Adding organizations cannot revive a connection with no valid memberships')
+    })
+    await t.test('SSO and anonymous users cannot authorize MCP', async () => {
+      const secret = randomBytes(32).toString('hex')
+      await pool.query('INSERT INTO organization_sso(id,org_id,secret,label) VALUES($1,$2,$3,$4)', [prefix, org, secret, prefix])
+      const jwt = await new SignJWT({ email: prefix + '-owner@example.invalid', name: prefix + '-owner' }).setProtectedHeader({ alg: 'HS256' }).setIssuedAt().setExpirationTime('5m').sign(new TextEncoder().encode(secret))
+      const response = await request('/api/sso/jwt?' + new URLSearchParams({ jwt, return_to: '/' }))
+      const ssoCookie = response.headers.getSetCookie().map(v => v.split(';')[0]).join('; ')
+      assert.equal((await request('/api/auth/oauth2/authorize', undefined, { cookie: ssoCookie })).status, 403)
+      assert.equal((await request('/api/mcp/connections', undefined, { cookie: ssoCookie })).status, 403)
+      await pool.query('DELETE FROM organization_sso WHERE id=$1', [prefix])
+      const anonymous = await request('/api/auth/sign-in/anonymous', {}, { origin })
+      const guest = await ok(anonymous)
+      userIds.push(guest.user.id)
+      const guestCookie = anonymous.headers.getSetCookie().map(value => value.split(';')[0]).join('; ')
+      assert.equal((await request('/api/auth/oauth2/authorize', undefined, { cookie: guestCookie })).status, 403)
+      assert.equal((await request('/api/mcp/connections', undefined, { cookie: guestCookie })).status, 403)
+    })
+    await t.test('deleting an account cleans grants and retains attributed audit history', async () => {
+      const issued = await ok(await exchange(registered.client_id, await consent(await begin(registered.client_id, other.cookie), [org], true, other.cookie)))
+      const removed = decodeJwt(issued.access_token).mcp_consent_id as string
+      await pool.query('UPDATE "user" SET role=$1 WHERE id=$2', ['admin', userId])
+      const login = await request('/api/auth/sign-in/email', { email: prefix + '-owner@example.invalid', password }, { origin })
+      await ok(login)
+      cookie = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; ')
+      await ok(await request('/api/auth/admin/remove-user', { userId: other.userId }, { cookie, origin }))
+      assert.equal((await pool.query('SELECT * FROM mcp_consent_organization WHERE consent_id=$1', [removed])).rowCount, 0)
+      assert.equal((await request('/api/mcp', {}, { authorization: 'Bearer ' + issued.access_token })).status, 401)
+      const audit = await pool.query("SELECT actor_user_id FROM mcp_audit_log WHERE consent_id=$1 AND operation='authorization.revoke'", [removed])
+      assert.equal(audit.rows[0]?.actor_user_id, userId)
+    })
+  } finally {
+    await sdk?.close().catch(() => {})
+    await pool.query('DELETE FROM mcp_audit_log WHERE actor_user_id = ANY($1::text[])', [userIds])
+    await pool.query('DELETE FROM verification WHERE identifier=$1', [prefix + '-plain-verification'])
+    await pool.query('DELETE FROM mcp_consent_organization WHERE consent_id IN (SELECT id FROM oauth_consent WHERE user_id = ANY($1::text[]))', [userIds])
+    await pool.query('DELETE FROM oauth_client WHERE client_id = ANY($1::text[])', [clientIds])
+    for (const id of contentIds.feedback) {
+      await pool.query('DELETE FROM comment_like WHERE comment_id IN (SELECT id FROM comment WHERE post_id=$1)', [id])
+      for (const table of ['comment', 'vote', 'post_subscription', 'post_unread']) await pool.query('DELETE FROM ' + table + ' WHERE post_id=$1', [id])
+      await pool.query('DELETE FROM post WHERE id=$1', [id])
+    }
+    await pool.query('DELETE FROM changelog_reaction WHERE changelog_id = ANY($1::uuid[])', [contentIds.changelogs])
+    for (const [table, ids] of [['changelog', contentIds.changelogs], ['help_article', contentIds.articles], ['help_collection', contentIds.collections], ['board', contentIds.boards]] as const) await pool.query('DELETE FROM ' + table + ' WHERE id = ANY($1::uuid[])', [ids])
+    await pool.query('DELETE FROM verification WHERE identifier LIKE $1 AND value::jsonb->>\'userId\' = ANY($2::text[])', ['mcp-request:%', userIds])
+    await pool.query('DELETE FROM organization_sso WHERE id=$1', [prefix])
+    await pool.query('DELETE FROM "user" WHERE id = ANY($1::text[])', [userIds])
+    await pool.query('DELETE FROM organization WHERE id = ANY($1::text[])', [[otherOrg, inaccessibleOrg]])
+    await pool.end()
+  }
+})

@@ -127,6 +127,20 @@
       "when": 1790741495915,
       "tag": "0017_inbox",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1790752516439,
+      "tag": "0018_mcp_oauth",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1791609211053,
+      "tag": "0019_mcp_authorizations",
+      "breakpoints": true
     }
   ]
 }

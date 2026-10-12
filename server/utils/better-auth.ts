@@ -12,6 +12,9 @@ import { GUEST_EMAIL_DOMAIN } from '../../shared/utils/guest'
 import { guestTag } from '../../shared/utils/identity'
 import { hashPassword, verifyPassword } from './password-hash'
 import { consola } from 'consola'
+import { mcpAuthPlugins } from '../mcp/auth-plugins'
+import { mcpEnabled, type mcpConfig } from '../mcp/config'
+import { cleanupMemberMcpAccess, cleanupOrganizationMcpAccess, cleanupUserMcpAccess } from '../mcp/grants'
 
 const logger = consola.withTag('auth')
 
@@ -187,7 +190,7 @@ export function buildAuthConfig(overrides: AuthConfigOverrides = {}): BetterAuth
       logger.warn(`Invitation email failed for ${data.email}: ${(e as Error)?.message ?? e}`)
     }
   }
-  const orgOpts = {
+  const orgOpts: NonNullable<Parameters<typeof organization>[0]> = {
     ac,
     roles: { owner, manager, contributor },
     creatorRole: 'owner' as const,
@@ -196,10 +199,21 @@ export function buildAuthConfig(overrides: AuthConfigOverrides = {}): BetterAuth
     // After the spread so our best-effort wrapper wins over an override's own
     // sender (it already delegates to that override via rawSendInvite).
     sendInvitationEmail,
+    organizationHooks: {
+      ...overrides.organizationExtras?.organizationHooks,
+      afterRemoveMember: async (data) => {
+        await cleanupMemberMcpAccess(data.member.id, data.user.id)
+        await overrides.organizationExtras?.organizationHooks?.afterRemoveMember?.(data)
+      },
+      afterDeleteOrganization: async (data, context) => {
+        await cleanupOrganizationMcpAccess(data.organization.id, data.user.id)
+        await overrides.organizationExtras?.organizationHooks?.afterDeleteOrganization?.(data, context)
+      },
+    },
   }
   const mergedSocial = defu(overrides.socialProviderOverrides ?? {}, socialProviders) as typeof socialProviders
   // Guests short-circuit ahead of the override so a deployment that swaps in its
-  // own bootstrap (the SaaS layer does) still gets them named — and never runs
+  // own bootstrap still gets them named — and never runs
   // org-membership bootstrap for an identity that can't be a member.
   const bootstrap = overrides.userCreateAfter ?? bootstrapAfterUserCreate
   const afterUserCreate = async (newUser: { id: string; email: string; isAnonymous?: boolean | null }) => {
@@ -260,6 +274,11 @@ export function buildAuthConfig(overrides: AuthConfigOverrides = {}): BetterAuth
         create: {
           after: afterUserCreate,
         },
+        delete: {
+          before: async (deletedUser, context) => {
+            await cleanupUserMcpAccess(deletedUser.id, context?.context.session?.user.id ?? deletedUser.id)
+          },
+        },
       },
     },
   }
@@ -302,7 +321,34 @@ export const auth = new Proxy({} as AuthInstance, {
   },
 })
 
+// Keep the OAuth issuer independent of ordinary web auth host switching.
+const mcpInstances = new Map<string, ReturnType<typeof createMcpAuth>>()
+function createMcpAuth(config: ReturnType<typeof mcpConfig>) {
+  const base = buildAuthConfig(_registeredOverrides ?? {})
+  return betterAuth({
+    ...base,
+    baseURL: config.origin,
+    // Organization scope and audit must change through the application management API.
+    disabledPaths: [...(base.disabledPaths ?? []), '/oauth2/delete-consent', '/oauth2/update-consent'],
+    trustedOrigins: [config.origin],
+    plugins: [...(base.plugins ?? []), ...mcpAuthPlugins(config)],
+    session: { ...base.session, cookieCache: { enabled: false } },
+  })
+}
+
+export function getMcpAuth(config: ReturnType<typeof mcpConfig>) {
+  let instance = mcpInstances.get(config.origin)
+  if (!instance) {
+    instance = createMcpAuth(config)
+    // Self-hosted installations may expose aliases; do not retain unbounded host keys.
+    if (mcpInstances.size >= 16) mcpInstances.delete(mcpInstances.keys().next().value!)
+    mcpInstances.set(config.origin, instance)
+  }
+  return instance
+}
+
 export const authConfig = {
+  mcp: mcpEnabled(),
   google: hasGoogle,
   github: hasGithub,
   email: emailLoginEnabled,

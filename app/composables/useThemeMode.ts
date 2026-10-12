@@ -23,6 +23,7 @@ export function useThemeMode() {
   const isPortalSurface = computed(() =>
     !route.path.startsWith('/dashboard')
     && !route.path.startsWith('/proto')
+    && !route.path.startsWith('/mcp')
     && !route.path.startsWith('/auth'))
   const themed = computed(() => isDashboard.value || isPortalSurface.value)
 

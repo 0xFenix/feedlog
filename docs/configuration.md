@@ -1,5 +1,7 @@
 # Configuration reference
 
+MCP is enabled by default; set `MCP_ENABLED=false` to disable it. The server uses the current external origin unless `BETTER_AUTH_URL` is configured. See [MCP](./mcp.md) for connection, organization access, and migration instructions.
+
 Complete list of environment variables FeedLog reads. For deploy-specific
 guidance, see the [Cloudflare Workers](./deploy/cloudflare-workers.md),
 [Vercel](./deploy/vercel.md), and [Docker](./deploy/docker.md) guides.
