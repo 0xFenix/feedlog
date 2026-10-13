@@ -1,4 +1,4 @@
-import { and, eq, sql, asc } from 'drizzle-orm'
+import { and, eq, isNull, sql, asc } from 'drizzle-orm'
 import { board, post } from '#layers/feedlog/server/db/schemas'
 
 // GET /api/boards — List boards (sorted by position, with post_count and total)
@@ -17,14 +17,14 @@ export default defineEventHandler(async (event): Promise<{ data: BoardItem[]; to
         createdAt: board.createdAt,
       })
       .from(board)
-      .leftJoin(post, and(eq(post.boardId, board.id), eq(post.orgId, orgId)))
+      .leftJoin(post, and(eq(post.boardId, board.id), eq(post.orgId, orgId), isNull(post.mergedTo)))
       .where(eq(board.orgId, orgId))
       .groupBy(board.id)
       .orderBy(asc(board.position)),
     db
       .select({ count: sql<number>`cast(count(*) as int)` })
       .from(post)
-      .where(eq(post.orgId, orgId)),
+      .where(and(eq(post.orgId, orgId), isNull(post.mergedTo))),
   ])
 
   return { data: boards, totalPostCount: totalResult[0]?.count ?? 0 }

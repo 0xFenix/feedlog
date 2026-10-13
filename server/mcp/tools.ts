@@ -158,6 +158,10 @@ export function createFeedLogMcpServer(event: H3Event, identity: McpIdentity, or
   register('list_help_collections', 'List help collections including visibility, icon, order and article count.', { ...scoped, ...pagination, visible: z.boolean().optional() }, {}, list('collections'))
   register('create_help_collection', 'Create a help collection. Visibility defaults true; an article must also be published to be public.', { ...scoped, ...createHelpCollectionSchema.shape }, { write: true, target: 'help_collection' }, (ctx, args) => publishing.createCollection(ctx, args))
   register('update_help_collection', 'Update collection metadata or visibility. Hiding a collection removes public access to its articles.', { ...scoped, collection_id: z.uuid(), ...updateHelpCollectionSchema.shape }, { write: true, target: 'help_collection', targetKey: 'collection_id' }, (ctx, args) => publishing.updateCollection(ctx, args.collection_id, args))
+  register('delete_help_collection', 'Permanently delete a help collection and all articles it contains, including drafts and published articles. Requires an organization owner or manager. To hide the collection while retaining its articles, use update_help_collection with visible false.', { ...scoped, collection_id: z.uuid() }, { write: true, destructive: true, target: 'help_collection', targetKey: 'collection_id' }, async (ctx, args) => {
+    await publishing.deleteCollection(ctx, args.collection_id)
+    return { id: args.collection_id, deleted: true }
+  })
   register('list_help_articles', 'List article summaries including drafts and hidden collections. Query matches title or body. AI Usage does not restrict management access.', {
     ...scoped, ...pagination, query: z.string().trim().min(1).max(500).optional(), collection_id: z.uuid().optional(),
     status: z.enum(['draft', 'published', 'archived']).optional(), ai_enabled: z.boolean().optional(),
@@ -172,7 +176,15 @@ export function createFeedLogMcpServer(event: H3Event, identity: McpIdentity, or
     ...scoped, ...articleId, collection_id: z.uuid().optional(), title: updateHelpArticleSchema.shape.title,
     description: updateHelpArticleSchema.shape.description, content: updateHelpArticleSchema.shape.content, ai_enabled: z.boolean().optional(),
   }, { write: true, target: 'help_article', targetKey: 'article_id', openWorld: true }, async (ctx, args) => linked(ctx, 'article', await publishing.updateArticle(ctx, args.article_id, { collectionId: args.collection_id, title: args.title, description: args.description, content: args.content, aiEnabled: args.ai_enabled })))
-  register('publish_help_article', 'Publish an article. Public access also requires a visible collection and enabled Help Center.', { ...scoped, ...articleId }, { write: true, target: 'help_article', targetKey: 'article_id', openWorld: true }, async (ctx, args) => linked(ctx, 'article', await publishing.updateArticle(ctx, args.article_id, { status: 'published' })))
+  register('publish_help_article', 'Publish an article. Public access also requires a visible collection and enabled Help Center. Report any returned warnings to the user before claiming public availability. Publishing does not enable Help Center; change portal settings only within the user\'s requested scope.', { ...scoped, ...articleId }, { write: true, target: 'help_article', targetKey: 'article_id', openWorld: true }, async (ctx, args) => {
+    const article = await publishing.updateArticle(ctx, args.article_id, { status: 'published' })
+    const portal = await getPortalSettings(ctx)
+    const warnings = portal.helpCenterEnabled ? [] : [{
+      code: 'HELP_CENTER_DISABLED',
+      message: 'The article is published, but Help Center is disabled. Readers cannot access it.',
+    }]
+    return linked(ctx, 'article', { ...article, warnings })
+  })
   register('unpublish_help_article', 'Withdraw a published article by changing its status to archived. The article is retained for editing and later publication.', { ...scoped, ...articleId }, { write: true, destructive: true, target: 'help_article', targetKey: 'article_id' }, async (ctx, args) => linked(ctx, 'article', await publishing.updateArticle(ctx, args.article_id, { status: 'archived' })))
   register('delete_help_article', 'Permanently delete a help article. To temporarily remove public access, use unpublish_help_article instead.', { ...scoped, ...articleId }, { write: true, destructive: true, target: 'help_article', targetKey: 'article_id' }, (ctx, args) => publishing.deleteArticle(ctx, args.article_id))
   register('list_changelogs', 'List changelog summaries by editing status or title/body substring. needs_update means unpublished edits to a public snapshot.', {

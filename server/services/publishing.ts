@@ -52,7 +52,7 @@ export async function articleRecord(context: ContentContext, id: string, view: '
   const visible = record.status === 'published' && collection.visible && resolvePortalModules(org?.metadata).helpCenter
   if (view === 'public' && !visible) throw contentError(404, 'Article is not publicly available')
   const { tsv: _tsv, ...article } = record
-  return { ...article, collection: { id: collection.id, name: collection.name, visible: collection.visible }, publiclyVisible: visible }
+  return { ...article, collection: { id: collection.id, name: collection.name, visible: collection.visible } }
 }
 async function articlePosition(context: ContentContext, collectionId: string) {
   const [last] = await context.db.select({ position: sql<number>`coalesce(max(${helpArticle.position}), -1)::int` }).from(helpArticle).where(and(eq(helpArticle.collectionId, collectionId), eq(helpArticle.orgId, context.orgId)))
