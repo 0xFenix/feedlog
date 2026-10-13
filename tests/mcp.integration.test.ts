@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict'
 import { randomBytes, createHash } from 'node:crypto'
 import { test } from 'node:test'
+import { request as httpRequest } from 'node:http'
 import { Pool } from 'pg'
 import { decodeJwt, SignJWT, generateKeyPair, exportJWK } from 'jose'
 import { uuidv7 } from 'uuidv7'
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
 
-interface ToolData { id: string; items: { id: string; parent_id?: string }[]; organizations: { id: string }[]; error?: { code: string }; next_cursor: string | null; [key: string]: unknown }
+interface ToolData { id: string; items: { id: string; parent_id?: string; [key: string]: unknown }[]; organizations: { id: string }[]; error?: { code: string }; next_cursor: string | null; [key: string]: unknown }
 
 const target = process.env.MCP_TEST_URL
 test('MCP: OAuth, multi-organization access and all business tools', { skip: !target, timeout: 180_000 }, async t => {
   const origin = new URL(target!).origin
+  const tenantHost = process.env.MCP_TEST_TENANT_HOST
+  if (tenantHost) assert.match(tenantHost, /^[a-z0-9-]+\.localhost:\d+$/)
   const database = new URL(process.env.MCP_TEST_DATABASE_URL!)
   assert.ok(['localhost', '127.0.0.1'].includes(new URL(origin).hostname))
   assert.ok(['localhost', '127.0.0.1'].includes(database.hostname))
@@ -20,7 +23,7 @@ test('MCP: OAuth, multi-organization access and all business tools', { skip: !ta
   const password = randomBytes(24).toString('base64url')
   const resource = origin + '/api/mcp'
   const redirectUri = 'http://127.0.0.1:8765/callback'
-  const org = 'default-org'
+  const org = tenantHost?.split('.')[0] ?? 'default-org'
   const otherOrg = prefix + '-other'
   const inaccessibleOrg = prefix + '-inaccessible'
   const userIds: string[] = []
@@ -32,6 +35,26 @@ test('MCP: OAuth, multi-organization access and all business tools', { skip: !ta
   let sdk: Client | undefined
 
   async function request(path: string, body?: unknown, headers: Record<string, string> = {}, method?: string) {
+    const tenant = tenantHost && !path.startsWith('/api/auth/') && !path.startsWith('/.well-known/') && (!path.startsWith('/api/mcp') || path.startsWith('/api/mcp/connections'))
+    if (tenant) return new Promise<Response>((resolve, reject) => {
+      const payload = body === undefined ? undefined : JSON.stringify(body)
+      const req = httpRequest(new URL(path, origin), {
+        method: method ?? (body === undefined ? 'GET' : 'POST'),
+        headers: { ...headers, ...(headers.origin === origin ? { origin: 'http://' + tenantHost } : {}), Host: tenantHost, ...(payload ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } : {}) },
+        timeout: 15_000,
+      }, response => {
+        const chunks: Buffer[] = []
+        response.on('data', chunk => chunks.push(chunk))
+        response.on('end', () => {
+          const responseHeaders = new Headers()
+          for (const [key, value] of Object.entries(response.headers)) for (const entry of Array.isArray(value) ? value : value === undefined ? [] : [value]) responseHeaders.append(key, entry)
+          resolve(new Response(response.statusCode === 204 ? null : Buffer.concat(chunks), { status: response.statusCode, headers: responseHeaders }))
+        })
+      })
+      req.on('timeout', () => req.destroy(new Error('Tenant request timed out')))
+      req.on('error', reject)
+      req.end(payload)
+    })
     return fetch(origin + path, { method: method ?? (body === undefined ? 'GET' : 'POST'), redirect: 'manual', signal: AbortSignal.timeout(15_000),
       headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
       body: body === undefined ? undefined : JSON.stringify(body) })
@@ -176,6 +199,9 @@ test('MCP: OAuth, multi-organization access and all business tools', { skip: !ta
       await pool.query('UPDATE post SET created_at=$1 WHERE id=$2', ['2099-01-01T00:00:00.000123Z', second])
       const page = await call('list_feedback', { limit: 1, query: prefix })
       assert.equal(page.items[0].id, first)
+      const legacyFingerprint = createHash('sha256').update(JSON.stringify({ kind: 'feedback', organizationId: org, filter: { query: prefix, include_merged: false, sort: 'created_desc' }, sort: 'created_at', ascending: false })).digest('hex')
+      const legacyCursor = btoa(JSON.stringify({ v: 1, filter: legacyFingerprint, key: '2099-01-01T00:00:00.000456Z', id: first }))
+      assert.equal((await call('list_feedback', { limit: 1, query: prefix, cursor: legacyCursor })).items[0]!.id, second)
       const next = await call('list_feedback', { limit: 1, query: prefix, cursor: page.next_cursor })
       assert.equal(next.items[0].id, second)
       await call('list_feedback', { limit: 1, query: 'different', cursor: page.next_cursor }, 'INVALID_CURSOR')
@@ -183,6 +209,24 @@ test('MCP: OAuth, multi-organization access and all business tools', { skip: !ta
       assert.equal((await call('get_feedback', { feedback_id: first })).status, 'planned')
       await call('get_feedback', { organization_id: otherOrg, feedback_id: first }, 'NOT_FOUND')
       await call('create_feedback', { organization_id: otherOrg, title: 'Invalid board', content: 'Must not persist', board_id: boardId }, 'NOT_FOUND')
+      const webBoards = await ok(await request('/api/boards', undefined, { cookie }))
+      assert.equal(webBoards.data.find((item: { id: string }) => item.id === boardId).postCount, 3)
+      const webFeedback = await ok(await request('/api/admin/posts?boardId=' + boardId, undefined, { cookie }))
+      assert.equal(webFeedback.pagination.total, 3)
+      assert.deepEqual(webFeedback.data.map((item: { id: string }) => item.id).sort(), [first, second, third].sort())
+      const detail = await call('get_feedback', { feedback_id: first })
+      const webDetail = await ok(await request('/api/posts/' + detail.slug, undefined, { cookie }))
+      assert.equal(webDetail.content, detail.content)
+      assert.equal(webDetail.status, detail.status)
+      assert.deepEqual(Object.keys(webDetail).sort(), ['id', 'sourceConversationId', 'sourceConversationTitle', 'slug', 'title', 'content', 'status', 'boardId', 'voteCount', 'commentCount', 'mergedTo', 'mergedCount', 'hasVoted', 'subscribed', 'author', 'createdAt', 'updatedAt'].sort())
+      const publicPage = await ok(await request('/api/posts?pageSize=1', undefined, { cookie }))
+      assert.equal(publicPage.data[0].id, first)
+      assert.ok(publicPage.pagination.nextCursor)
+      const secondWebPage = await ok(await request('/api/posts?pageSize=1&cursor=' + encodeURIComponent(publicPage.pagination.nextCursor), undefined, { cookie }))
+      assert.equal(secondWebPage.data[0].id, second)
+      const webBoard = await ok(await request('/api/admin/boards', { name: prefix + ' Web board' }, { cookie, origin }), 201)
+      contentIds.boards.push(webBoard.id)
+      assert.ok((await call('list_boards')).items.some(item => item.id === webBoard.id))
       await call('find_similar_feedback', { feedback_id: first })
       await call('find_similar_feedback', { title: prefix, content: 'Markdown feedback', limit: 3 })
       await call('find_similar_feedback', { organization_id: otherOrg, feedback_id: first }, 'NOT_FOUND')
@@ -195,9 +239,21 @@ test('MCP: OAuth, multi-organization access and all business tools', { skip: !ta
       await call('update_feedback_comment', { comment_id: parent.id, content: 'Updated public reply.' })
       const comments = await call('list_feedback_comments', { feedback_id: first })
       assert.equal(comments.items.length, 2)
+      await pool.query('UPDATE "user" SET image=$1 WHERE id=$2', ['/api/files/avatar.png', userId])
+      const latest = await call('get_feedback', { feedback_id: first })
+      const latestComments = latest.comments as { id: string; author: { image: string } }[]
+      assert.deepEqual(latestComments.map(item => item.id), [reply.id, parent.id])
+      assert.ok(latestComments[0]!.author.image.startsWith('http://'))
+      const ascending = await call('list_feedback_comments', { feedback_id: first, sort: 'created_asc' })
+      assert.deepEqual(ascending.items.map(item => item.id), [parent.id, reply.id])
+      await pool.query('UPDATE "user" SET image=NULL WHERE id=$1', [userId])
       assert.equal((comments.items[0] as Record<string, unknown>).feedback_id, first)
       assert.equal((comments.items[0] as Record<string, unknown>).post_id, undefined)
       assert.equal(comments.items.find((x: { id: string }) => x.id === reply.id).parent_id, parent.id)
+      const webComments = await ok(await request('/api/posts/' + first + '/comments?withChildren=true&sort=newest', undefined, { cookie }))
+      assert.equal(webComments.data[0].id, parent.id)
+      assert.equal(webComments.data[0].children[0].id, reply.id)
+      assert.equal(webComments.data[0].content, 'Updated public reply.')
       const likes = await Promise.all([1, 2].map(() => request('/api/comments/' + parent.id + '/like', {}, { cookie: other.cookie, origin })))
       for (const response of likes) assert.equal((await ok(response)).likeCount, 1)
       const anotherPerson = await ok(await request('/api/posts/' + first + '/comments', { content: 'Another person wrote this.' }, { cookie: other.cookie, origin }), 201)
@@ -222,12 +278,30 @@ test('MCP: OAuth, multi-organization access and all business tools', { skip: !ta
       assert.equal((await call('get_feedback', { feedback_id: first })).vote_count, 1)
       assert.equal((await call('get_feedback', { feedback_id: first })).comment_count, 0)
       await call('merge_feedback', { source_feedback_id: third, target_feedback_id: first })
+      const boardCounts = await ok(await request('/api/boards', undefined, { cookie }))
+      assert.equal(boardCounts.data.find((item: { id: string }) => item.id === boardId).postCount, 1)
+      assert.equal(boardCounts.totalPostCount, 1)
+      const roadmap = await ok(await request('/api/roadmap', undefined, { cookie }))
+      assert.equal(roadmap.planned.total, 1)
       await call('unmerge_feedback', { feedback_id: second })
       assert.equal((await call('get_feedback', { feedback_id: first })).vote_count, 2)
       await call('delete_feedback', { feedback_id: first }, 'INVALID_ARGUMENT')
       await call('unmerge_feedback', { feedback_id: third })
       await call('delete_board', { board_id: boardId })
       assert.equal((await call('get_feedback', { feedback_id: first })).board_id, null)
+    })
+    await t.test('merged comment previews cannot read another organization through metadata', async () => {
+      const foreign = await call('create_feedback', { organization_id: otherOrg, title: 'Separate organization feedback', content: 'Separate organization body.' })
+      contentIds.feedback.push(foreign.id)
+      await call('create_feedback_comment', { organization_id: otherOrg, feedback_id: foreign.id, content: 'Separate organization reply.' })
+      const recordId = uuidv7()
+      await pool.query('INSERT INTO comment(id,post_id,author_id,content,type,metadata) VALUES($1,$2,$3,$4,$5,$6)', [recordId, first, userId, '', 'mergedPost', JSON.stringify({ merged_post_id: foreign.id })])
+      try {
+        const result = await ok(await request('/api/posts/' + first + '/comments?withChildren=true&sort=newest', undefined, { cookie }))
+        const preview = result.data.find((item: { id: string }) => item.id === recordId)
+        assert.equal(preview.mergedPost.post, null)
+        assert.deepEqual(preview.mergedPost.comments.data, [])
+      } finally { await pool.query('DELETE FROM comment WHERE id=$1', [recordId]) }
     })
     await t.test('help collection and article lifecycle, public visibility and AI Usage', async () => {
       const previousSettings = await call('get_portal_settings')
@@ -248,6 +322,12 @@ test('MCP: OAuth, multi-organization access and all business tools', { skip: !ta
       const article = await call('create_help_article', { collection_id: collection.id, title: 'Integration guide', content: '# Setup\nOriginal body', ai_enabled: false })
       contentIds.articles.push(article.id)
       assert.equal(article.status, 'draft'); assert.equal(article.ai_enabled, false)
+      const webCollections = await ok(await request('/api/admin/help/collections', undefined, { cookie }))
+      assert.equal(webCollections.data.find((item: { id: string }) => item.id === collection.id).articleCount, 1)
+      const webArticles = await ok(await request('/api/admin/help/articles', undefined, { cookie }))
+      assert.equal(webArticles.data[0].id, article.id)
+      assert.equal((await ok(await request('/api/admin/help/articles/' + article.id, undefined, { cookie }))).content, '# Setup\nOriginal body')
+      assert.equal((await request('/api/help/articles/' + article.short_id)).status, 404)
       await call('get_help_article', { article_id: article.id, view: 'public' }, 'NOT_FOUND')
       await call('update_help_article', { article_id: article.id, content: '# Setup\nUpdated body' })
       assert.equal((await call('list_help_articles', { query: 'Updated body' })).items[0].id, article.id)
@@ -263,6 +343,10 @@ test('MCP: OAuth, multi-organization access and all business tools', { skip: !ta
       await call('get_help_article', { article_id: article.id, view: 'public' }, 'NOT_FOUND')
       await call('update_portal_settings', { help_center_enabled: true })
       assert.deepEqual((await call('publish_help_article', { article_id: article.id })).warnings, [])
+      const webPublished = await ok(await request('/api/help/articles/' + article.short_id))
+      assert.equal(webPublished.content, '# Setup\nUpdated body')
+      assert.equal((await ok(await request('/api/help/collections'))).data[0].articleCount, 1)
+      assert.equal((await ok(await request('/api/help/collections/' + collection.id))).articles[0].shortId, article.short_id)
       const publicArticle = await call('get_help_article', { article_id: article.id, view: 'public' })
       assert.equal(publicArticle.id, article.id)
       assert.equal('publicly_visible' in publicArticle, false)
@@ -289,16 +373,100 @@ test('MCP: OAuth, multi-organization access and all business tools', { skip: !ta
       const edited = await call('get_changelog', { changelog_id: changelog.id })
       assert.equal(edited.status, 'needs_update'); assert.equal(edited.published_content, 'Original release notes.')
       assert.equal((await call('list_changelogs', { query: prefix })).items[0].id, changelog.id)
+      const webList = await ok(await request('/api/admin/changelogs', undefined, { cookie }))
+      assert.equal(webList.data[0].id, changelog.id)
+      assert.equal((await ok(await request('/api/admin/changelogs/' + changelog.id, undefined, { cookie }))).content, 'Edited release notes.')
+      assert.equal((await ok(await request('/api/changelogs/' + changelog.slug))).content, 'Original release notes.')
+      assert.equal((await ok(await request('/api/changelogs'))).data[0].content, 'Original release notes.')
       await pool.query('INSERT INTO changelog_reaction(changelog_id,user_id,emoji) VALUES($1,$2,$3)', [changelog.id, userId, 'like'])
       await call('delete_changelog', { organization_id: otherOrg, changelog_id: changelog.id }, 'NOT_FOUND')
       assert.equal((await pool.query('SELECT * FROM changelog_reaction WHERE changelog_id=$1', [changelog.id])).rowCount, 1)
       await call('delete_changelog', { changelog_id: changelog.id })
+    })
+    await t.test('Web writes and MCP reads share business rules and response contracts', async () => {
+      const web = (path: string, body?: unknown, method?: string) => request(path, body, { cookie, origin }, method)
+      await pool.query('UPDATE member SET role=$1 WHERE user_id=$2 AND organization_id=$3', ['manager', userId, org])
+      const board = await ok(await web('/api/admin/boards', { name: prefix + ' Web lifecycle' }), 201)
+      contentIds.boards.push(board.id)
+      await ok(await web('/api/admin/boards/' + board.id, { description: 'Updated on the Web' }, 'PATCH'))
+      assert.equal((await call('list_boards')).items.find(item => item.id === board.id)!.description, 'Updated on the Web')
+      const feedback = await ok(await web('/api/posts', { title: prefix + ' Web feedback', content: 'Original Web content.', boardId: board.id }), 201)
+      contentIds.feedback.push(feedback.id)
+      await ok(await web('/api/admin/posts/' + feedback.id, { status: 'done', content: 'Edited on the Web.' }, 'PATCH'))
+      const detail = await call('get_feedback', { feedback_id: feedback.id })
+      assert.equal(detail.content, 'Edited on the Web.')
+      assert.equal(detail.status, 'done')
+      assert.equal('content_hash' in detail, false)
+      assert.equal('source_conversation_id' in detail, false)
+      const comment = await ok(await web('/api/posts/' + feedback.id + '/comments', { content: 'Web reply.' }), 201)
+      await ok(await web('/api/comments/' + comment.id, { content: 'Edited reply.' }, 'PATCH'))
+      assert.equal((await call('list_feedback_comments', { feedback_id: feedback.id })).items[0]!.content, 'Edited reply.')
+      await ok(await web('/api/comments/' + comment.id, undefined, 'DELETE'), 204)
+      assert.equal((await call('get_feedback', { feedback_id: feedback.id })).comment_count, 0)
+      await web('/api/admin/boards/' + board.id, undefined, 'DELETE').then(response => assert.equal(response.status, 204))
+      assert.equal((await call('get_feedback', { feedback_id: feedback.id })).board_id, null)
+      assert.ok((await call('list_feedback', { board_id: null })).items.some(item => item.id === feedback.id))
+      const unassigned = await ok(await web('/api/admin/posts?boardId=none'))
+      assert.ok(unassigned.data.some((item: { id: string }) => item.id === feedback.id))
+      await web('/api/admin/posts/' + feedback.id, undefined, 'DELETE').then(response => assert.equal(response.status, 204))
+      await call('get_feedback', { feedback_id: feedback.id }, 'NOT_FOUND')
+
+      const collection = await ok(await web('/api/admin/help/collections', { name: prefix + ' Web docs', icon: 'book-open' }), 201)
+      contentIds.collections.push(collection.id)
+      const articles = []
+      for (let index = 0; index < 3; index++) {
+        const article = await ok(await web('/api/admin/help/articles', { collectionId: collection.id, title: prefix + ' Article ' + index, content: 'Article body.' }), 201)
+        contentIds.articles.push(article.id); articles.push(article)
+        await pool.query('UPDATE help_article SET created_at=$1,updated_at=$2 WHERE id=$3', ['2099-01-01T00:00:00.000' + (120 + index) + 'Z', '2099-01-02T00:00:00.000' + (123 - index) + 'Z', article.id])
+      }
+      await ok(await web('/api/admin/help/articles/' + articles[0].id, { status: 'published' }, 'PATCH'))
+      assert.equal((await call('get_help_article', { article_id: articles[0].id })).status, 'published')
+      for (const sort of ['created_asc', 'created_desc', 'updated_desc']) {
+        const items: string[] = []; let cursor: string | null = null
+        do {
+          const page = await call('list_help_articles', { collection_id: collection.id, sort, limit: 1, ...(cursor ? { cursor } : {}) })
+          items.push(...page.items.map(item => item.id)); cursor = page.next_cursor
+        } while (cursor)
+        assert.equal(new Set(items).size, 3)
+        assert.deepEqual(items, (sort === 'created_asc' ? articles : sort === 'created_desc' ? [...articles].reverse() : [articles[1], articles[2], articles[0]]).map(item => item.id))
+      }
+      const listArticle = (await call('list_help_articles', { collection_id: collection.id })).items[0]!
+      const getArticle = await call('get_help_article', { article_id: listArticle.id })
+      assert.equal(listArticle.created_at, getArticle.created_at)
+      assert.match(String(listArticle.created_at), /Z$/)
+      assert.equal('tsv' in listArticle, false)
+      assert.equal('content' in listArticle, false)
+      const listPage = await call('list_help_articles', { collection_id: collection.id, sort: 'created_asc', limit: 1 })
+      await call('list_help_articles', { collection_id: collection.id, sort: 'created_desc', limit: 1, cursor: listPage.next_cursor }, 'INVALID_CURSOR')
+      await ok(await web('/api/admin/help/collections/' + collection.id, { visible: false }, 'PATCH'))
+      await call('get_help_article', { article_id: articles[0].id, view: 'public' }, 'NOT_FOUND')
+      assert.equal((await request('/api/help/articles/' + articles[0].shortId)).status, 404)
+      await web('/api/admin/help/collections/' + collection.id, undefined, 'DELETE').then(response => assert.equal(response.status, 204))
+      for (const article of articles) await call('get_help_article', { article_id: article.id }, 'NOT_FOUND')
+
+      const release = await ok(await web('/api/admin/changelogs', { title: prefix + ' Web release', content: 'Public snapshot.', categories: ['new'] }), 201)
+      contentIds.changelogs.push(release.id)
+      await ok(await web('/api/admin/changelogs/' + release.id + '/publish', {}))
+      await ok(await web('/api/admin/changelogs/' + release.id, { content: 'Pending edit.' }, 'PATCH'))
+      const changelog = await call('get_changelog', { changelog_id: release.id })
+      assert.equal(changelog.published_content, 'Public snapshot.')
+      assert.equal(changelog.content, 'Pending edit.')
+      const listed = (await call('list_changelogs')).items.find(item => item.id === release.id)!
+      assert.equal(listed.updated_at, changelog.updated_at)
+      assert.match(String(listed.updated_at), /Z$/)
+      assert.equal('published_content' in listed, false)
+      assert.equal((await ok(await request('/api/changelogs/' + release.slug))).content, 'Public snapshot.')
+      await web('/api/admin/changelogs/' + release.id, undefined, 'DELETE').then(response => assert.equal(response.status, 204))
+      await call('get_changelog', { changelog_id: release.id }, 'NOT_FOUND')
+      await pool.query('UPDATE member SET role=$1 WHERE user_id=$2 AND organization_id=$3', ['owner', userId, org])
     })
     await t.test('live role changes and consent audit records', async () => {
       await pool.query('UPDATE member SET role=$1 WHERE user_id=$2 AND organization_id=$3', ['contributor', userId, org])
       await call('update_feedback', { feedback_id: first, title: prefix + ' Author edit' })
       await call('update_feedback', { feedback_id: first, status: 'done' }, 'FORBIDDEN')
       await call('create_board', { name: 'Not allowed' }, 'FORBIDDEN')
+      assert.equal((await request('/api/admin/boards', { name: 'Not allowed' }, { cookie, origin })).status, 403)
+      assert.equal((await request('/api/admin/posts', undefined, { cookie })).status, 200)
       assert.equal((await call('get_portal_settings')).help_center_enabled, true)
       await call('update_portal_settings', { help_center_enabled: false }, 'FORBIDDEN')
       await call('delete_help_collection', { collection_id: contentIds.collections[0] }, 'FORBIDDEN')
@@ -311,12 +479,14 @@ test('MCP: OAuth, multi-organization access and all business tools', { skip: !ta
       assert.ok(listing.items.find((x: { id: string }) => x.id === consentId).lastUsedAt)
       assert.equal(seen.size, 36, 'Exercise every tool')
     })
-    await t.test('a failed audit rolls back the business write and records failure', async () => {
+    await t.test('a failed success audit preserves the committed business write and response', async () => {
       await pool.query("ALTER TABLE mcp_audit_log ADD CONSTRAINT mcp_test_rollback CHECK (operation <> 'create_board' OR status <> 'success') NOT VALID")
       try {
-        await call('create_board', { name: prefix + '-rollback' }, 'WRITE_RESULT_UNKNOWN')
-        assert.equal((await pool.query('SELECT id FROM board WHERE name=$1', [prefix + '-rollback'])).rowCount, 0)
-        assert.ok((await pool.query("SELECT id FROM mcp_audit_log WHERE consent_id=$1 AND operation='create_board' AND status='failure'", [consentId])).rowCount)
+        const created = await call('create_board', { name: prefix + '-audit-failure' })
+        contentIds.boards.push(created.id)
+        assert.equal((await pool.query('SELECT id FROM board WHERE name=$1', [prefix + '-audit-failure'])).rowCount, 1)
+        assert.equal((await pool.query("SELECT id FROM mcp_audit_log WHERE target_id=$1 AND status='failure'", [created.id])).rowCount, 0)
+        assert.ok((await call('list_boards')).items.some(item => item.id === created.id))
       } finally { await pool.query('ALTER TABLE mcp_audit_log DROP CONSTRAINT mcp_test_rollback') }
     })
     await t.test('DPoP binding and proof replay are enforced with provider keys', async () => {
@@ -436,7 +606,7 @@ test('MCP: OAuth, multi-organization access and all business tools', { skip: !ta
     await pool.query('DELETE FROM verification WHERE identifier LIKE $1 AND value::jsonb->>\'userId\' = ANY($2::text[])', ['mcp-request:%', userIds])
     await pool.query('DELETE FROM organization_sso WHERE id=$1', [prefix])
     await pool.query('DELETE FROM "user" WHERE id = ANY($1::text[])', [userIds])
-    await pool.query('DELETE FROM organization WHERE id = ANY($1::text[])', [[otherOrg, inaccessibleOrg]])
+    await pool.query('DELETE FROM organization WHERE id = ANY($1::text[])', [[otherOrg, inaccessibleOrg, ...(tenantHost ? [org] : [])]])
     await pool.end()
   }
 })

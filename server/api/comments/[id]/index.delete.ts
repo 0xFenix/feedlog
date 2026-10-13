@@ -1,5 +1,5 @@
 import { contentTransaction } from '#layers/feedlog/server/services/content-context'
-import { deleteComment } from '#layers/feedlog/server/services/feedback'
+import { deleteComment } from '#layers/feedlog/server/services/comments'
 
 export default defineEventHandler(async event => {
   const { session, orgId } = await requireAuthInOrg(event)

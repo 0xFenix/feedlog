@@ -4,6 +4,7 @@ import { db } from '../db'
 import { member } from '../db/schemas'
 
 export type ContentDatabase = Pick<typeof db, 'select' | 'insert' | 'update' | 'delete' | 'execute' | 'transaction'>
+export type ContentReader = Pick<ContentContext, 'db' | 'orgId'>
 export interface ContentContext {
   db: ContentDatabase
   orgId: string

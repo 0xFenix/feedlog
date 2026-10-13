@@ -1,5 +1,5 @@
 import { contentTransaction } from '#layers/feedlog/server/services/content-context'
-import { createArticle } from '#layers/feedlog/server/services/publishing'
+import { createArticle } from '#layers/feedlog/server/services/help-center'
 import { createHelpArticleSchema } from '#layers/feedlog/shared/schemas/help'
 
 export default defineEventHandler(async event => {

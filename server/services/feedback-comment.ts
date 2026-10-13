@@ -1,7 +1,8 @@
 import type { H3Event } from 'h3'
 import type { z } from 'zod'
 import { contentTransaction } from './content-context'
-import { createComment, feedbackCommentSchema, feedbackRecord } from './feedback'
+import { createComment, feedbackCommentSchema } from './comments'
+import { feedbackRecord } from './feedback'
 
 export const createCommentSchema = feedbackCommentSchema
 export async function createFeedbackComment(

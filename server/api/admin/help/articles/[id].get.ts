@@ -1,10 +1,8 @@
-export default defineEventHandler(async (event) => {
+import { articleRecord } from '#layers/feedlog/server/services/help-center'
+
+export default defineEventHandler(async event => {
   const { orgId } = await requireOrgMember(event)
-
-  const article = await findHelpArticleDetail(orgId, getRouterParam(event, 'id')!)
-  if (!article) {
-    throw createError({ statusCode: 404, message: 'Article not found' })
-  }
-
-  return article
+  const article = await articleRecord({ db: useDB(), orgId }, getRouterParam(event, 'id')!)
+  const { id, shortId, slug, title, description, content, status, aiEnabled, publishedAt, createdAt, updatedAt, collection } = article
+  return { id, shortId, slug, title, description, content, status, aiEnabled, publishedAt, createdAt, updatedAt, collection }
 })

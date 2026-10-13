@@ -1,5 +1,5 @@
 import { contentTransaction } from '#layers/feedlog/server/services/content-context'
-import { publishChangelog } from '#layers/feedlog/server/services/publishing'
+import { publishChangelog } from '#layers/feedlog/server/services/changelogs'
 
 export default defineEventHandler(async event => {
   const { session, orgId } = await requireOrgPermission(event, { feedlog: ['moderate'] })

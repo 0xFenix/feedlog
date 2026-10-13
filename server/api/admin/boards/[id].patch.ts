@@ -1,5 +1,5 @@
 import { contentTransaction } from '#layers/feedlog/server/services/content-context'
-import { updateBoard } from '#layers/feedlog/server/services/feedback'
+import { updateBoard } from '#layers/feedlog/server/services/boards'
 import { updateBoardSchema } from '#layers/feedlog/shared/schemas/board'
 
 export default defineEventHandler(async event => {

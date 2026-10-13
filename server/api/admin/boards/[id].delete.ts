@@ -1,5 +1,5 @@
 import { contentTransaction } from '#layers/feedlog/server/services/content-context'
-import { deleteBoard } from '#layers/feedlog/server/services/feedback'
+import { deleteBoard } from '#layers/feedlog/server/services/boards'
 
 export default defineEventHandler(async event => {
   const { session, orgId } = await requireOrgPermission(event, { feedlog: ['moderate'] })

@@ -1,9 +1,9 @@
 import slugify from 'slugify'
 import { customAlphabet } from 'nanoid'
 import pinyin from 'pinyinlite'
-import { and, eq, sql } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import type { SQL } from 'drizzle-orm'
-import { helpArticle, helpCollection } from '#layers/feedlog/server/db/schemas'
+import { helpArticle } from '#layers/feedlog/server/db/schemas'
 import { CJK_RANGE, HELP_SHORT_ID_ALPHABET, HELP_SHORT_ID_LENGTH } from '#layers/feedlog/shared/constants/help'
 
 const CJK = new RegExp(`[${CJK_RANGE}]`)
@@ -51,37 +51,6 @@ export async function withHelpShortId<T>(insert: (shortId: string) => Promise<T>
     }
   }
   throw createError({ statusCode: 500, message: 'Failed to generate article id' })
-}
-
-export async function findHelpArticleDetail(orgId: string, id: string) {
-  const db = useDB()
-
-  const [row] = await db
-    .select({
-      id: helpArticle.id,
-      shortId: helpArticle.shortId,
-      slug: helpArticle.slug,
-      title: helpArticle.title,
-      description: helpArticle.description,
-      content: helpArticle.content,
-      status: helpArticle.status,
-      aiEnabled: helpArticle.aiEnabled,
-      publishedAt: helpArticle.publishedAt,
-      createdAt: helpArticle.createdAt,
-      updatedAt: helpArticle.updatedAt,
-      collectionId: helpCollection.id,
-      collectionName: helpCollection.name,
-      collectionVisible: helpCollection.visible,
-    })
-    .from(helpArticle)
-    .innerJoin(helpCollection, eq(helpArticle.collectionId, helpCollection.id))
-    .where(and(eq(helpArticle.id, id), eq(helpArticle.orgId, orgId)))
-    .limit(1)
-
-  if (!row) return null
-
-  const { collectionId, collectionName, collectionVisible, ...article } = row
-  return { ...article, collection: { id: collectionId, name: collectionName, visible: collectionVisible } }
 }
 
 export async function nextHelpArticlePosition(collectionId: string): Promise<number> {

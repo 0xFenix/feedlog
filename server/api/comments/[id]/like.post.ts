@@ -1,5 +1,5 @@
 import { contentTransaction } from '../../../services/content-context'
-import { setCommentLike } from '../../../services/feedback'
+import { setCommentLike } from '../../../services/comments'
 
 export default defineEventHandler(async event => {
   const { session, orgId } = await requireAuthInOrg(event)

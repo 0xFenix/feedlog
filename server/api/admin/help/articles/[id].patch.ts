@@ -1,5 +1,5 @@
 import { contentTransaction } from '#layers/feedlog/server/services/content-context'
-import { updateArticle } from '#layers/feedlog/server/services/publishing'
+import { updateArticle } from '#layers/feedlog/server/services/help-center'
 import { updateHelpArticleSchema } from '#layers/feedlog/shared/schemas/help'
 
 export default defineEventHandler(async event => {

@@ -1,18 +1,18 @@
-import { and, eq, sql } from 'drizzle-orm'
+import { cursorPage, literalSubstring, type CursorPageInput } from './query-pagination'
+import { and, eq, ilike, or, sql } from 'drizzle-orm'
 import type { z } from 'zod'
-import { changelog, changelogReaction, helpArticle, helpCollection, organization } from '../db/schemas'
+import { helpArticle, helpCollection, organization } from '../db/schemas'
 import { createHelpArticleSchema, createHelpCollectionSchema, updateHelpArticleSchema, updateHelpCollectionSchema } from '../../shared/schemas/help'
-import { createChangelogSchema, updateChangelogSchema } from '../../shared/schemas/changelog'
 import { buildHelpTsv, withHelpShortId, generateHelpSlug } from '../utils/help'
 import { resolvePortalModules } from '../../shared/utils/portal-modules'
-import { contentError, requireModerator, type ContentContext } from './content-context'
+import { contentError, requireModerator, type ContentReader, type ContentContext } from './content-context'
 
 async function lockHelpContent(context: ContentContext) {
   // Collection deletion and article movement must acquire locks in the same order.
   await context.db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${context.orgId + ':help'}, 0))`)
 }
 
-export async function helpCollectionRecord(context: ContentContext, id: string) {
+export async function helpCollectionRecord(context: ContentReader, id: string) {
   const [record] = await context.db.select().from(helpCollection).where(and(eq(helpCollection.id, id), eq(helpCollection.orgId, context.orgId))).for('share')
   if (!record) throw contentError(404, 'Collection not found')
   return record
@@ -43,16 +43,15 @@ export async function deleteCollection(context: ContentContext, id: string) {
   if (!deleted) throw contentError(404, 'Collection not found')
   await context.db.delete(helpArticle).where(and(eq(helpArticle.collectionId, id), eq(helpArticle.orgId, context.orgId)))
 }
-export async function articleRecord(context: ContentContext, id: string, view: 'management' | 'public' = 'management', lock = false) {
-  const query = context.db.select().from(helpArticle).where(and(eq(helpArticle.id, id), eq(helpArticle.orgId, context.orgId)))
+export async function articleRecord(context: ContentReader, id: string, view: 'management' | 'public' = 'management', lock = false, by: 'id' | 'shortId' = 'id') {
+  const query = context.db.select({ ...articleSummaryFields, content: helpArticle.content }).from(helpArticle).where(and(eq(by === 'id' ? helpArticle.id : helpArticle.shortId, id), eq(helpArticle.orgId, context.orgId)))
   const [record] = await (lock ? query.for('update') : query)
   if (!record) throw contentError(404, 'Article not found')
   const collection = await helpCollectionRecord(context, record.collectionId)
   const [org] = await context.db.select({ metadata: organization.metadata }).from(organization).where(eq(organization.id, context.orgId))
   const visible = record.status === 'published' && collection.visible && resolvePortalModules(org?.metadata).helpCenter
   if (view === 'public' && !visible) throw contentError(404, 'Article is not publicly available')
-  const { tsv: _tsv, ...article } = record
-  return { ...article, collection: { id: collection.id, name: collection.name, visible: collection.visible } }
+  return { ...record, collection: { id: collection.id, name: collection.name, visible: collection.visible } }
 }
 async function articlePosition(context: ContentContext, collectionId: string) {
   const [last] = await context.db.select({ position: sql<number>`coalesce(max(${helpArticle.position}), -1)::int` }).from(helpArticle).where(and(eq(helpArticle.collectionId, collectionId), eq(helpArticle.orgId, context.orgId)))
@@ -111,40 +110,38 @@ export async function deleteArticle(context: ContentContext, id: string) {
   if (!record) throw contentError(404, 'Article not found')
   return { id, deleted: true }
 }
-export async function changelogRecord(context: ContentContext, id: string, lock = false) {
-  const query = context.db.select().from(changelog).where(and(eq(changelog.id, id), eq(changelog.orgId, context.orgId)))
-  const [record] = await (lock ? query.for('update') : query)
-  if (!record) throw contentError(404, 'Changelog not found')
-  return record
+
+export const collectionFields = {
+  id: helpCollection.id, orgId: helpCollection.orgId, name: helpCollection.name,
+  description: helpCollection.description, icon: helpCollection.icon, visible: helpCollection.visible, position: helpCollection.position,
 }
-export async function createChangelog(context: ContentContext, body: z.infer<typeof createChangelogSchema>) {
-  requireModerator(context)
-  const input = createChangelogSchema.parse(body)
-  const [record] = await context.db.insert(changelog).values({ ...input, orgId: context.orgId, authorId: context.userId, slug: await generateChangelogSlug(input.title) }).returning()
-  return record!
+export const articleSummaryFields = {
+  id: helpArticle.id, orgId: helpArticle.orgId, collectionId: helpArticle.collectionId,
+  shortId: helpArticle.shortId, slug: helpArticle.slug, status: helpArticle.status,
+  title: helpArticle.title, description: helpArticle.description, aiEnabled: helpArticle.aiEnabled,
+  position: helpArticle.position, publishedAt: helpArticle.publishedAt, createdAt: helpArticle.createdAt, updatedAt: helpArticle.updatedAt,
 }
-export async function updateChangelog(context: ContentContext, id: string, body: z.infer<typeof updateChangelogSchema>) {
-  requireModerator(context)
-  const input = updateChangelogSchema.parse(body)
-  if (!Object.values(input).some(value => value !== undefined)) throw contentError(400, 'No fields to update')
-  const existing = await changelogRecord(context, id, true)
-  const [record] = await context.db.update(changelog).set({ ...input, ...(existing.status === 'published' ? { status: 'needs_update' } : {}) }).where(and(eq(changelog.id, id), eq(changelog.orgId, context.orgId))).returning()
-  return record!
+export function articleConditions(orgId: string, input: { status?: string; collectionId?: string; aiEnabled?: boolean; query?: string } = {}) {
+  return [
+    eq(helpArticle.orgId, orgId),
+    input.status ? eq(helpArticle.status, input.status as 'draft' | 'published' | 'archived') : undefined,
+    input.collectionId ? eq(helpArticle.collectionId, input.collectionId) : undefined,
+    input.aiEnabled === undefined ? undefined : eq(helpArticle.aiEnabled, input.aiEnabled),
+    input.query ? or(ilike(helpArticle.title, literalSubstring(input.query)), ilike(helpArticle.content, literalSubstring(input.query))) : undefined,
+  ]
 }
-export async function publishChangelog(context: ContentContext, id: string) {
-  requireModerator(context)
-  const existing = await changelogRecord(context, id, true)
-  if (!existing.title.trim() || !existing.content.trim()) throw contentError(400, 'Title and content are required to publish')
-  const [record] = await context.db.update(changelog).set({
-    publishedTitle: existing.title, publishedContent: existing.content, publishedCategories: existing.categories,
-    publishedCover: existing.cover, status: 'published', publishedAt: new Date(),
-  }).where(and(eq(changelog.id, id), eq(changelog.orgId, context.orgId))).returning()
-  return record!
+export async function listCollections(context: ContentReader, input: CursorPageInput & { visible?: boolean }) {
+  const page = await cursorPage(input, { kind: 'collections', organizationId: context.orgId, filter: { visible: input.visible }, sort: 'position', ascending: true }, helpCollection.position, helpCollection.id, true, true)
+  const rows = await context.db.select({ ...collectionFields, articleCount: sql<number>`count(${helpArticle.id})::int`, cursorKey: helpCollection.position })
+    .from(helpCollection).leftJoin(helpArticle, and(eq(helpArticle.collectionId, helpCollection.id), eq(helpArticle.orgId, context.orgId)))
+    .where(and(eq(helpCollection.orgId, context.orgId), input.visible === undefined ? undefined : eq(helpCollection.visible, input.visible), page.after))
+    .groupBy(helpCollection.id).orderBy(...page.orderBy).limit(input.limit + 1)
+  return page.finish(rows)
 }
-export async function deleteChangelog(context: ContentContext, id: string) {
-  requireModerator(context)
-  await changelogRecord(context, id, true)
-  await context.db.delete(changelogReaction).where(eq(changelogReaction.changelogId, id))
-  await context.db.delete(changelog).where(and(eq(changelog.id, id), eq(changelog.orgId, context.orgId)))
-  return { id, deleted: true }
+export async function listArticles(context: ContentReader, input: CursorPageInput & { query?: string; collectionId?: string; status?: string; aiEnabled?: boolean; sort?: 'created_desc' | 'created_asc' | 'updated_desc' }) {
+  const filter = { query: input.query, collection_id: input.collectionId, status: input.status, ai_enabled: input.aiEnabled, sort: input.sort }
+  const page = await cursorPage(input, { kind: 'articles', organizationId: context.orgId, filter, sort: input.sort === 'updated_desc' ? 'updated_at' : 'created_at', ascending: input.sort === 'created_asc' }, input.sort === 'updated_desc' ? helpArticle.updatedAt : helpArticle.createdAt, helpArticle.id, input.sort === 'created_asc')
+  const rows = await context.db.select({ ...articleSummaryFields, cursorKey: page.cursorKey }).from(helpArticle)
+    .where(and(...articleConditions(context.orgId, input), page.after)).orderBy(...page.orderBy).limit(input.limit + 1)
+  return page.finish(rows)
 }

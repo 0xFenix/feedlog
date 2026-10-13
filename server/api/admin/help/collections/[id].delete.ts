@@ -1,5 +1,5 @@
 import { contentTransaction } from '../../../../services/content-context'
-import { deleteCollection } from '../../../../services/publishing'
+import { deleteCollection } from '../../../../services/help-center'
 
 export default defineEventHandler(async event => {
   const { session, orgId } = await requireOrgPermission(event, { feedlog: ['moderate'] })
