@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { useClipboard } from '@vueuse/core'
-const open = ref(false)
+import { useClipboard, useLocalStorage } from '@vueuse/core'
+// Read the browser preference after hydration so the initial server and client markup match.
+const open = useLocalStorage('feedlog:mcp:skills-expanded', true, { initOnMounted: true, writeDefaults: false })
 const command = 'npx skills add linkcraftstudio/feedlog-skills'
 const { t } = useI18n()
 const { copy, copied } = useClipboard({ source: command })
