@@ -12,6 +12,7 @@ import { publicItem, publicRun } from './runtime'
 import { startRun } from '#layers/feedlog/server/lib/agent/conversations'
 import { prepareAgent, customerMemoryMessage } from '#layers/feedlog/server/lib/agent/agent'
 import { collectConversationReply } from '#layers/feedlog/server/lib/agent/stream'
+import { keepVerifiedHelpReferences, removeUnverifiedAnswerLinks, verifyHelpCitations } from '#layers/feedlog/server/lib/agent/citation-evidence'
 import { addTokenUsage, type RunTokenUsage } from '#layers/feedlog/shared/agent/usage'
 
 export async function streamAgentReply(event: H3Event, actor: Actor) {
@@ -73,8 +74,25 @@ export async function streamAgentReply(event: H3Event, actor: Actor) {
       })
       if (failed || signal.aborted) throw new Error('Model execution did not complete')
       await runtime.memory.settled()
-      const text = reply.message.parts.filter(part => part.type === 'text').map(part => part.text).join('\n\n').trim()
-      const content = contentSchema.parse({ parts: [...(text ? [{ type: 'text', text }] : []), ...await prepared.resultParts()] })
+      let text = reply.message.parts.filter(part => part.type === 'text').map(part => part.text).join('\n\n').trim()
+      let parts = await prepared.resultParts()
+      const citedIds = [...new Set(parts.flatMap(part => part.type === 'article_reference'
+        ? part.articles.map(article => article.article_id) : []))]
+      if (text && citedIds.length) {
+        const { rows: candidates } = await runtime.pool.query<{ id: string; title: string; content: string }>(
+          'SELECT id,title,content FROM help_article WHERE id=ANY($1::uuid[]) AND org_id=$2 AND ai_enabled',
+          [citedIds, actor.orgId],
+        )
+        const question = item.content.parts.filter(part => part.type === 'text').map(part => part.text).join('\n')
+        const verdict = await verifyHelpCitations(question, text, candidates, {
+          timeoutMs: Math.max(1000, Math.min(12000, new Date(run.deadline_at).getTime() - Date.now() - 1000)),
+        })
+        if (verdict.status === 'unavailable') console.warn('[agent] Citation verification unavailable', { runId: run.id })
+        const verifiedIds = new Set(verdict.matches.map(match => match.id))
+        parts = keepVerifiedHelpReferences(parts, verifiedIds)
+        text = removeUnverifiedAnswerLinks(text, candidates, verifiedIds)
+      }
+      const content = contentSchema.parse({ parts: [...(text ? [{ type: 'text', text }] : []), ...parts] })
       const lastSeq = await transaction(runtime, async client => {
         await lockConversation(client, id, actor)
         const { rowCount } = await client.query("SELECT id FROM agent_run WHERE id=$1 AND status='running' AND deadline_at>clock_timestamp()", [run.id])
