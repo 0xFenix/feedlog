@@ -143,6 +143,17 @@ export default defineNuxtConfig({
   // it is worth caching — but briefly: a deploy rotates the asset hashes the
   // shell points at, and a stale one asks for chunks the new image never built.
   routeRules: {
+    // Functional pages are excluded from discovery and carry a noindex response.
+    // Nuxt SEO applies these rules to configured locale prefixes as well.
+    '/dashboard/**': { sitemap: false, robots: false },
+    '/auth/**': { sitemap: false, robots: false },
+    '/invite': { sitemap: false, robots: false },
+    '/reset-password': { sitemap: false, robots: false },
+    '/verified': { sitemap: false, robots: false },
+    '/mcp/**': { sitemap: false, robots: false },
+    '/sso/**': { sitemap: false, robots: false },
+    '/setup': { sitemap: false, robots: false },
+    '/widget/**': { sitemap: false, robots: false },
     '/widget/embed': {
       ssr: false,
       headers: { 'cache-control': 'public, max-age=300, stale-while-revalidate=600' },
