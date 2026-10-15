@@ -5,10 +5,10 @@ import { deliverReplyTask } from './email'
 export async function inboxTick(runtime: InboxRuntime) {
   const result = { closed: 0, resumed: 0, recoveredRuns: 0, emails: 0, failed: 0, hasMore: false }
   const started = Date.now()
-  const { rows } = await runtime.pool.query(`SELECT id FROM scheduled_task WHERE
+  const { rows } = await runtime.pool.query(`SELECT id FROM scheduled_task WHERE kind<>'help_index' AND (
     (status='pending' AND schedule_at<=clock_timestamp()) OR
     (status='processing' AND updated_at<clock_timestamp()-interval '10 minutes') OR
-    (status NOT IN ('pending','processing','done','cancelled') AND schedule_at<=clock_timestamp())
+    (status NOT IN ('pending','processing','done','cancelled') AND schedule_at<=clock_timestamp()))
     ORDER BY schedule_at,id LIMIT 101`)
   result.hasMore = rows.length > 100
   for (const candidate of rows.slice(0, 100)) {

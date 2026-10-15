@@ -321,6 +321,17 @@ test('MCP: OAuth, multi-organization access and all business tools', { skip: !ta
       assert.ok((await call('list_help_collections')).items.some((x: { id: string }) => x.id === collection.id))
       const article = await call('create_help_article', { collection_id: collection.id, title: 'Integration guide', content: '# Setup\nOriginal body', ai_enabled: false })
       contentIds.articles.push(article.id)
+      if (process.env.MCP_TEST_HELP_INDEX === 'true') {
+        // MCP and Web must share the same committed indexing wake, not only the DB trigger.
+        let attempts = 0
+        for (let i = 0; i < 25 && attempts === 0; i++) {
+          const { rows: [job] } = await pool.query("SELECT t.attempts FROM scheduled_task t JOIN help_article a ON a.id=t.ref_id WHERE t.kind='help_index' AND a.id=$1 AND a.org_id=$2", [article.id, org])
+          assert.ok(job, 'MCP article creates its durable index job in the same transaction')
+          attempts = job.attempts
+          if (!attempts) await new Promise(resolve => setTimeout(resolve, 200))
+        }
+        assert.ok(attempts > 0, 'MCP afterCommit starts indexing without a periodic scan')
+      }
       assert.equal(article.status, 'draft'); assert.equal(article.ai_enabled, false)
       const webCollections = await ok(await request('/api/admin/help/collections', undefined, { cookie }))
       assert.equal(webCollections.data.find((item: { id: string }) => item.id === collection.id).articleCount, 1)

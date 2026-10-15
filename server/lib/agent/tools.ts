@@ -143,7 +143,7 @@ export function feedlogTools(event: H3Event, actor: Actor, conversationId: strin
       articles.set(article.article_id, reference)
       return { ...reference, content: article.content, url: customer_visible ? new URL(`/help/${route}`, getRequestURL(event).origin).href : null }
     }),
-    cite_help_articles: tool('cite_help_articles', 'Attach the articles actually used in the final answer as customer-visible references. Only IDs already read are accepted. The application automatically renders the returned part as article cards; write the answer in natural language.', z.object({ article_ids: z.array(z.uuid()).min(1).max(8) }), async ({ article_ids }) => {
+    cite_help_articles: tool('cite_help_articles', 'Attach only articles that directly support the central answer to the customer’s question. Do not include articles read only for background, a generic dashboard link, or an optional navigation detail. Only IDs already read are accepted. The application verifies citation support and renders accepted references as article cards; write the answer in natural language.', z.object({ article_ids: z.array(z.uuid()).min(1).max(8) }), async ({ article_ids }) => {
       const references = [...new Set<string>(article_ids)].map(id => {
         const article = articles.get(id)
         if (!article?.customer_visible) throw new Error('Only a read, customer-visible article can be cited')
