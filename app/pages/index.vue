@@ -17,7 +17,10 @@ const timeAgo = useTimeAgo()
 
 // Board store
 const boardStore = useBoardStore()
-const { boards, boardMap, totalPostCount } = storeToRefs(boardStore)
+// Portal counts belong to this view; dialogs and other pages use unfiltered metadata.
+const boards = ref<BoardItem[]>([])
+const totalPostCount = ref(0)
+const boardMap = computed(() => new Map(boards.value.map(board => [board.id, board.name])))
 
 // Currently selected board and sort order
 const route = useRoute()
@@ -55,9 +58,21 @@ function selectStatus(value: BoardStatusFilter) {
   router.push({ query })
 }
 
-// Sidebar counts are fetched with the same filter — a badge reading 8 above a
-// list of 3 reads as a bug.
-await callOnce(() => boardStore.fetchBoards(statusList.value))
+let countSequence = 0
+async function refreshBoardCounts() {
+  const current = ++countSequence
+  const result = await useApiFetch<{ data: BoardItem[]; totalPostCount: number }>('/api/boards', {
+    query: { status: statusList.value?.join(',') || undefined },
+  })
+  if (current !== countSequence) return
+  boards.value = result.data
+  totalPostCount.value = result.totalPostCount
+}
+
+await Promise.all([
+  callOnce(() => boardStore.fetchBoards()),
+  refreshBoardCounts(),
+])
 
 // Post list
 const sort = computed(() => sortBy.value === 'top' ? 'votes' : 'createdAt')
@@ -94,88 +109,59 @@ const searchActive = computed(() => searchQuery.value.trim().length > 0)
 const searchToolbar = ref<{ reset: () => void } | null>(null)
 let boardSwitchClearing = false
 
-// Reset list when filters change
-watch(activeBoardId, async () => {
-  if (searchActive.value) return
-  startLoading()
-  fetchingPosts.value = true
-  try {
-    const data = await fetchPosts()
-    posts.value = data.data
-    nextCursor.value = data.pagination.nextCursor
-  } finally {
-    finishLoading()
-    fetchingPosts.value = false
-  }
-})
-
-watch(statusFilter, async () => {
-  void boardStore.fetchBoards(statusList.value)
-  // A committed search is filtered client-side (see `visiblePosts`), so there is
-  // nothing to refetch.
-  if (searchActive.value) return
-  startLoading()
-  fetchingPosts.value = true
-  try {
-    const data = await fetchPosts()
-    posts.value = data.data
-    nextCursor.value = data.pagination.nextCursor
-  } finally {
-    finishLoading()
-    fetchingPosts.value = false
-  }
-})
-
-watch(sort, async () => {
-  if (searchActive.value) return
-  fetchingPosts.value = true
-  try {
-    const data = await fetchPosts()
-    posts.value = data.data
-    nextCursor.value = data.pagination.nextCursor
-  } finally {
-    fetchingPosts.value = false
-  }
-})
-
+let postSequence = 0
 async function refreshPosts() {
-  const data = await fetchPosts()
-  posts.value = data.data
-  nextCursor.value = data.pagination.nextCursor
+  const current = ++postSequence
+  const q = searchQuery.value.trim()
+  searching.value = !!q
+  fetchingPosts.value = !q
+  startLoading()
+  try {
+    const result: { data: PostListItem[]; pagination?: { nextCursor: string | null } } = q
+      ? await useApiFetch<{ data: PostListItem[] }>('/api/posts/search', {
+          query: { q, status: statusList.value?.join(',') || undefined },
+        })
+      : await fetchPosts()
+    if (current !== postSequence) return
+    posts.value = result.data
+    nextCursor.value = result.pagination?.nextCursor ?? null
+  } finally {
+    if (current === postSequence) {
+      searching.value = false
+      fetchingPosts.value = false
+      finishLoading()
+    }
+  }
 }
 
+watch(activeBoardId, () => refreshPosts())
+watch(statusFilter, async () => {
+  await Promise.all([refreshBoardCounts(), refreshPosts()])
+})
+watch(sort, async () => {
+  if (!searchActive.value) await refreshPosts()
+})
 watch(searchQuery, async () => {
-  const q = searchQuery.value.trim()
-  if (!q) {
-    if (boardSwitchClearing) { boardSwitchClearing = false; return }
-    await refreshPosts()
+  if (!searchActive.value && boardSwitchClearing) {
+    boardSwitchClearing = false
     return
   }
-  searching.value = true
-  try {
-    const res = await useApiFetch<{ data: PostListItem[] }>('/api/posts/search', { query: { q } })
-    posts.value = res.data
-    nextCursor.value = null // search returns a flat capped set — no "load more"
-  } finally {
-    searching.value = false
-  }
+  await refreshPosts()
 })
 
-// Search asks the server for a fixed nearest-N set, so the status filter is
-// applied to what comes back rather than pushed into the query: it narrows those
-// matches rather than searching deeper. Right trade — search here is a
-// duplicate check, not a way to browse.
-const visiblePosts = computed(() => {
-  if (!searchActive.value || !statusList.value) return posts.value
-  const allowed = new Set<string>(statusList.value)
-  return posts.value.filter(p => allowed.has(p.status))
+onBeforeUnmount(() => {
+  postSequence++
+  countSequence++
+  finishLoading()
 })
 
 async function loadMore() {
-  if (!nextCursor.value || loadingMore.value) return
+  if (!nextCursor.value || loadingMore.value || fetchingPosts.value || searchActive.value) return
+  const current = postSequence
   loadingMore.value = true
   try {
     const data = await fetchPosts(nextCursor.value)
+    if (current !== postSequence) return
     posts.value.push(...data.data)
     nextCursor.value = data.pagination.nextCursor
   } finally {
@@ -192,7 +178,10 @@ async function selectBoard(boardId: string | null) {
     boardSwitchClearing = true
     searchQuery.value = ''
   }
-  router.push({ query: boardId ? { b: boardId } : {} })
+  const query = { ...route.query }
+  if (boardId) query.b = boardId
+  else delete query.b
+  await router.push({ query })
   if (wasCommitted && sameBoard) await refreshPosts()
 }
 
@@ -256,10 +245,10 @@ function onPostUpdated(updated: { id: string; status?: string; boardId?: string 
   const idx = posts.value.findIndex(p => p.id === updated.id)
   if (idx === -1) return
 
-  // Board changed → the sidebar's per-board counts (served from the board store)
-  // are now stale. Compare against the pre-update boardId, then refresh the store.
-  if (updated.boardId !== undefined && updated.boardId !== posts.value[idx].boardId) {
-    void boardStore.fetchBoards(statusList.value)
+  const previous = posts.value[idx]!
+  if ((updated.boardId !== undefined && updated.boardId !== previous.boardId)
+    || (updated.status !== undefined && updated.status !== previous.status)) {
+    void Promise.all([refreshBoardCounts(), boardStore.fetchBoards()])
   }
 
   // If status or board changed and no longer matches current filter, remove
@@ -270,7 +259,6 @@ function onPostUpdated(updated: { id: string; status?: string; boardId?: string 
 
   // Status moved out of the current filter → drop it, same as a board change does.
   if (updated.status !== undefined && statusList.value) {
-    void boardStore.fetchBoards(statusList.value) // the counts just shifted between statuses
     if (!statusList.value.includes(updated.status as PostStatus)) {
       posts.value.splice(idx, 1)
       return
@@ -284,8 +272,12 @@ function onPostUpdated(updated: { id: string; status?: string; boardId?: string 
 function onPostDeleted(postId: string) {
   const idx = posts.value.findIndex(p => p.id === postId)
   if (idx !== -1) posts.value.splice(idx, 1)
-  // A deleted post drops its board's count (and the total) → refresh the store.
-  void boardStore.fetchBoards(statusList.value)
+  // Refresh both the filtered portal counts and unfiltered metadata consumers.
+  void Promise.all([refreshBoardCounts(), boardStore.fetchBoards()])
+}
+
+async function onPostCreated() {
+  await Promise.all([refreshPosts(), refreshBoardCounts()])
 }
 
 // Vote / unvote on list items
@@ -431,7 +423,7 @@ async function handleVote(post: PostListItem) {
     <div :class="{ 'opacity-50 pointer-events-none': fetchingPosts || searching }" class="transition-opacity duration-200">
 
     <!-- Empty state -->
-    <div v-if="visiblePosts.length === 0" class="flex flex-col items-center justify-center py-16 text-muted-foreground">
+    <div v-if="posts.length === 0" class="flex flex-col items-center justify-center py-16 text-muted-foreground">
       <!-- Search yielded nothing: nudge toward raising it (duplicate-prevention payoff) -->
       <template v-if="searchActive">
         <Icon name="lucide:search-x" size="48" class="mb-4 opacity-50" />
@@ -463,7 +455,7 @@ async function handleVote(post: PostListItem) {
     <!-- Feedback card list -->
     <div v-else class="flex flex-col gap-4">
       <article
-        v-for="p in visiblePosts"
+        v-for="p in posts"
         :key="p.id"
         class="feedback-card flex items-stretch gap-4 bg-card border border-border rounded-lg p-4 cursor-pointer"
         data-fdl-action="feedback_open"
@@ -559,7 +551,7 @@ async function handleVote(post: PostListItem) {
     v-model:open="showSubmit"
     :default-board-id="activeBoardId ?? undefined"
     :prefill="submitPrefill"
-    @created="refreshPosts()"
+    @created="onPostCreated"
   />
 </template>
 

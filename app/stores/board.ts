@@ -11,18 +11,9 @@ export const useBoardStore = defineStore('board', () => {
 
   const totalPostCount = ref(0)
 
-  // Statuses the counts are currently narrowed to, remembered so the refetches
-  // below keep the portal's filter rather than silently widening back to "all".
-  // Passing nothing clears it — which is what the dashboard pages do, since the
-  // store is one instance for the whole session and their counts are unfiltered.
-  const countStatuses = ref<string[] | null>(null)
-
   // Read
-  async function fetchBoards(statuses?: string[] | null) {
-    countStatuses.value = statuses?.length ? statuses : null
-    const res = await useApiFetch<{ data: BoardItem[]; totalPostCount: number }>('/api/boards', {
-      query: { status: countStatuses.value?.join(',') || undefined },
-    })
+  async function fetchBoards() {
+    const res = await useApiFetch<{ data: BoardItem[]; totalPostCount: number }>('/api/boards')
     boards.value = res.data
     totalPostCount.value = res.totalPostCount
   }
@@ -30,13 +21,13 @@ export const useBoardStore = defineStore('board', () => {
   // Admin: create
   async function createBoard(data: { name: string; description?: string }) {
     await useApiFetch('/api/admin/boards', { method: 'POST', body: data })
-    await fetchBoards(countStatuses.value)
+    await fetchBoards()
   }
 
   // Admin: update
   async function updateBoard(id: string, data: { name?: string; description?: string | null }) {
     await useApiFetch(`/api/admin/boards/${id}`, { method: 'PATCH', body: data })
-    await fetchBoards(countStatuses.value)
+    await fetchBoards()
   }
 
   // Admin: delete
