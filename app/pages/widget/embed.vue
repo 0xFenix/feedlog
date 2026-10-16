@@ -18,6 +18,7 @@ const { t } = useI18n()
 const embed = useWidgetEmbed()
 const { status, allowGuest, widgetFetch, loadSession } = embed
 const protocol = useWidgetProtocol()
+const widgetLocale = useWidgetLocale(protocol.locale)
 provide(widgetEmbedKey, embed)
 provide(widgetProtocolKey, protocol)
 
@@ -325,7 +326,7 @@ onMounted(async () => {
     })
     .catch(() => {})
 
-  const [signedIn] = await Promise.all([loadSession(), config])
+  const [signedIn] = await Promise.all([loadSession(), config, widgetLocale.init()])
   // Nobody yet, but writing is allowed: open on the composer rather than the
   // wall. The identity appears on the first send, not here.
   if (!signedIn && allowGuest.value) status.value = 'guest'
