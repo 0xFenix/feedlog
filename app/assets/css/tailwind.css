@@ -180,6 +180,13 @@
 }
 
 @layer base {
+  /* Reserve space before an icon's generated CSS is available. */
+  .iconify {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    flex-shrink: 0;
+  }
   * {
     @apply border-border outline-ring/50;
   }
