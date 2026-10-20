@@ -182,7 +182,7 @@ overrides, and authentication toggles.
 | Blob storage | Cloudflare R2 binding, Vercel Blob, or S3-compatible via `aws4fetch` (AWS, MinIO, OSS) |
 | State | Pinia |
 | UI | Tailwind CSS v4, shadcn-vue (new-york), Lucide icons |
-| Editor | md-editor-v3 |
+| Editor | Tiptap 3 (visual) + CodeMirror 6 (Markdown source) |
 | Deploy targets | Cloudflare Workers, Vercel, Node.js Docker |
 | Package manager | pnpm |
 

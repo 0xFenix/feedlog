@@ -32,6 +32,7 @@ const props = defineProps<{ articleId?: string; collectionId?: string }>()
 
 const { t, locale } = useI18n()
 const { confirm } = useConfirmDialog()
+const { onUploadImg } = useUploadImg()
 const router = useRouter()
 const localePath = useLocalePath()
 
@@ -357,7 +358,7 @@ function goBack() {
           <p class="mb-2.5 mt-3 text-[11px] font-bold uppercase leading-[17px] tracking-[.05em] text-muted-foreground">
             {{ $t('help.admin.editor.body') }}<span aria-hidden="true" class="ml-0.5 text-destructive">*</span>
           </p>
-          <div ref="bodyField" class="help-editor-body">
+          <div ref="bodyField" class="help-editor-body help-article-styled">
             <ClientOnly>
               <ThemedMdEditor
                 v-model="form.content"
@@ -366,8 +367,9 @@ function goBack() {
                 :placeholder="$t('help.admin.editor.bodyPlaceholder')"
                 :preview="false"
                 :footers="['markdownTotal']"
-                :toolbars="['bold', 'italic', 'strikeThrough', '-', 'title', 'unorderedList', 'orderedList', '-', 'link', 'image', 'code', 'codeRow', '=', 0]"
+                :toolbars="['bold', 'italic', 'strikeThrough', '-', 'title', 'unorderedList', 'orderedList', '-', 'link', 'image', 'code', 'codeRow', 'table', '=', 0]"
                 class="help-editor-input"
+                @on-upload-img="onUploadImg"
               />
             </ClientOnly>
             <p v-if="errors.content" role="alert" class="mt-2 text-xs text-destructive">{{ $t('help.admin.editor.contentRequired') }}</p>

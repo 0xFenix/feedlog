@@ -6,6 +6,7 @@ import { mergePortalModulesMetadata, resolvePortalModules } from '#layers/feedlo
 definePageMeta({ layout: 'dashboard', middleware: ['admin'] })
 
 const { t } = useI18n()
+const { onUploadImg } = useUploadImg()
 const ctx = useOrgContext()
 const orgId = computed(() => ctx.value.orgId)
 const isOwner = computed(() => ctx.value.role === 'owner')
@@ -46,7 +47,7 @@ async function toggleHelpCenter(value: boolean) {
   }
 }
 
-const toolbars = ['bold', 'italic', 'strikeThrough', '-', 'title', 'unorderedList', 'orderedList', '-', 'link', 'code', 'codeRow']
+const toolbars = ['bold', 'italic', 'strikeThrough', '-', 'title', 'unorderedList', 'orderedList', '-', 'link', 'code', 'codeRow', 'table']
 
 async function loadOrg() {
   if (!ctx.value.role) return
@@ -172,6 +173,7 @@ async function save() {
                   :disabled="!isOwner"
                   :style="{ height: '220px' }"
                   class="mt-2 !rounded-lg"
+                  @on-upload-img="onUploadImg"
                 />
                 <template #fallback>
                   <div class="mt-2 h-[220px] rounded-lg border border-border bg-background grid place-items-center text-xs text-muted-foreground">{{ $t('settings.portal.loadingEditor') }}</div>
