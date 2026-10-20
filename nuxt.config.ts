@@ -188,6 +188,14 @@ export default defineNuxtConfig({
     transpile: ['reka-ui'],
   },
 
+  vite: {
+    ssr: {
+      // PostCSS uses nanoid's CommonJS entry through sanitize-html. Bundle it
+      // before Nitro can resolve the flattened import to the ESM-only version.
+      noExternal: ['nanoid'],
+    },
+  },
+
   nitro: {
     externals: {
       traceInclude: mastraTraceInclude,
@@ -216,13 +224,6 @@ export default defineNuxtConfig({
     // the state classifier never leaves `bootstrap`.
     unenv: {
       external: ['node:fs', 'node:fs/promises', 'node:path', 'node:process'],
-    },
-  },
-
-  vite: {
-    ssr: {
-      // Exclude md-editor-v3 from SSR bundle — it's browser-only and very large (~2MB)
-      external: ['md-editor-v3'],
     },
   },
 
