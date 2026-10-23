@@ -1,8 +1,11 @@
+import { createEvent, getQuery, getRouterParam } from 'h3'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { readConversationItems } from '../server/lib/agent/history'
 import assert from 'node:assert/strict'
 import { test, after } from 'node:test'
 import { uuidv7 } from 'uuidv7'
 import { agentRuntime, transaction, appendItem, type Actor } from '../server/lib/agent/runtime'
-import { startRun } from '../server/lib/agent/conversations'
+import { startRun, renewRun, failRun } from '../server/lib/agent/conversations'
 import { handoff, staffCommand } from '../server/lib/inbox/service'
 import { syncConversationTask, syncRunTask } from '../server/lib/inbox/tasks'
 import { inboxTick } from '../server/lib/inbox/tick'
@@ -30,7 +33,7 @@ const send = () =>
     message: { id: uuidv7(), content: { parts: [{ type: 'text', text: 'Please help' }] } },
   })
 const errorCode = (code: string) => (error: unknown) => (error as { data?: { code: string } }).data?.code === code
-async function fixture() {
+async function fixture(firstAnswerDeadline?: number) {
   const orgId = `inbox-${uuidv7()}`,
     userId = `customer-${uuidv7()}`,
     staffId = `staff-${uuidv7()}`,
@@ -38,8 +41,9 @@ async function fixture() {
   await pool.query('INSERT INTO organization (id,name,slug) VALUES ($1,$1,$1)', [orgId])
   for (const uid of [userId, staffId])
     await pool.query('INSERT INTO "user" (id,name,email) VALUES ($1,$1,$2)', [uid, `${uid}@example.invalid`])
+  await pool.query("INSERT INTO member(id,organization_id,user_id,role,created_at) VALUES ($1,$2,$1,'manager',now())", [staffId, orgId])
   const actor = { orgId, customerId: userId, retentionDays: 14 } as Actor
-  const first = await startRun(runtime, id, actor, send())
+  const first = await startRun(runtime, id, actor, send(), firstAnswerDeadline)
   const row = async () => (await pool.query('SELECT * FROM conversation WHERE id=$1', [id])).rows[0]
   const action = async (value: 'close' | 'resume') =>
     staffCommand(runtime, id, orgId, staffId, {
@@ -147,7 +151,8 @@ test('real scheduler closes AI/pending, wakes snoozed, recovers abandoned runs a
     )
     await transaction(runtime, client => syncRunTask(client, f.first.run!.id))
     assert.equal((await inboxTick(runtime)).recoveredRuns, 1)
-    assert.equal((await f.row()).status, 'open')
+    assert.equal((await f.row()).status, 'ai_handling')
+    assert.equal((await pool.query('SELECT error FROM agent_run WHERE id=$1', [f.first.run!.id])).rows[0].error, 'ai_timeout')
     for (const state of ['pending', 'snoozed', 'ai_handling']) {
       await pool.query("UPDATE conversation SET status=$2,state_due_at=now()-interval '1 second' WHERE id=$1", [
         f.id,
@@ -166,15 +171,15 @@ test('real scheduler closes AI/pending, wakes snoozed, recovers abandoned runs a
   }
 })
 
-test('scheduled runtime uses its invocation binding, publishes committed handoff and releases connections', async () => {
+test('scheduled runtime fails stalled runs without handoff and releases connections', async () => {
   const f = await fixture()
   const events: import('../server/lib/inbox/events').InboxEvent[] = []
   try {
     await pool.query("UPDATE agent_run SET started_at=now()-interval '3 minutes',deadline_at=now()-interval '1 minute' WHERE id=$1", [f.first.run!.id])
     await transaction(runtime, client => syncRunTask(client, f.first.run!.id))
     await runScheduledInbox({ cloudflare: { env: { POSTGRES: { connectionString: process.env.DATABASE_URL! } } } }, event => events.push(event))
-    assert.equal((await f.row()).status, 'open')
-    assert.ok(events.some(event => event.name === 'inbox.handoff' && event.data.conversationId === f.id && event.data.reason === 'ai_error'))
+    assert.equal((await f.row()).status, 'ai_handling')
+    assert.equal(events.some(event => event.name === 'inbox.handoff'), false)
     await pool.query("UPDATE conversation SET status='pending',state_due_at=now()-interval '1 second' WHERE id=$1", [f.id])
     await transaction(runtime, client => syncConversationTask(client, f.id))
     await runScheduledInbox()
@@ -357,5 +362,55 @@ test('replaying a saved reply never writes another item or restarts its close de
     assert.deepEqual(replay.item, saved.item)
     assert.equal(Number((await f.row()).last_seq), Number(row.last_seq))
     assert.equal(+(await f.row()).state_due_at, +row.state_due_at)
+  } finally { await f.clean() }
+})
+
+test('progress renews the durable deadline beyond 120 seconds and expired runs cannot revive', async () => {
+  const f = await fixture()
+  try {
+    await pool.query("UPDATE agent_run SET started_at=now()-interval '5 minutes',deadline_at=now()+interval '1 minute' WHERE id=$1", [f.first.run!.id])
+    const deadline = Date.now() + 120000
+    assert.equal(await renewRun(runtime, f.id, f.actor, f.first.run!.id, deadline), true)
+    const { rows: [task] } = await pool.query("SELECT schedule_at,status FROM scheduled_task WHERE ref_id=$1 AND kind='agent_deadline'", [f.first.run!.id])
+    assert.equal(new Date(task.schedule_at).getTime(), deadline)
+    assert.equal(task.status, 'pending')
+    await inboxTick(runtime)
+    assert.equal((await pool.query('SELECT status FROM agent_run WHERE id=$1', [f.first.run!.id])).rows[0].status, 'running')
+    await pool.query("UPDATE agent_run SET deadline_at=now()-interval '1 second' WHERE id=$1", [f.first.run!.id])
+    assert.equal(await renewRun(runtime, f.id, f.actor, f.first.run!.id, Date.now() + 120000), false)
+    await transaction(runtime, client => syncRunTask(client, f.first.run!.id))
+    await inboxTick(runtime)
+    assert.equal((await pool.query('SELECT status FROM agent_run WHERE id=$1', [f.first.run!.id])).rows[0].status, 'failed')
+    assert.equal((await f.row()).status, 'ai_handling')
+    const retried = await startRun(runtime, f.id, f.actor, { action: 'retry', trigger_item_id: f.first.item.id, idempotency_key: uuidv7() })
+    assert.equal(retried.run.status, 'running')
+  } finally { await f.clean() }
+})
+
+test('preflight time is included in the first-answer deadline', async () => {
+  const deadline = Date.now() + 45000
+  const f = await fixture(deadline)
+  try {
+    assert.equal(new Date(f.first.run!.deadline_at).getTime(), deadline)
+    const { rows: [task] } = await pool.query("SELECT schedule_at FROM scheduled_task WHERE ref_id=$1 AND kind='agent_deadline'", [f.first.run!.id])
+    assert.equal(new Date(task.schedule_at).getTime(), deadline)
+  } finally { await f.clean() }
+})
+
+
+test('incremental history reports failed runs even when no new message was added', async () => {
+  Object.assign(globalThis, { getQuery, getRouterParam })
+  const f = await fixture()
+  try {
+    const event = createEvent({ url: `/api/widget/conversations/${f.id}/items?afterSeq=1`, headers: { host: 'localhost' }, method: 'GET' } as IncomingMessage, {} as ServerResponse)
+    event.context.params = { id: f.id }
+    const before = await readConversationItems(event, f.actor)
+    assert.equal(before.items.length, 0)
+    assert.equal(before.runs.at(-1)?.status, 'running')
+    await failRun(runtime, f.first.run!.id, 'ai_timeout')
+    const after = await readConversationItems(event, f.actor)
+    assert.equal(after.items.length, 0)
+    assert.equal(after.runs.at(-1)?.status, 'failed')
+    assert.equal(after.runs.at(-1)?.error, 'ai_timeout')
   } finally { await f.clean() }
 })

@@ -104,7 +104,7 @@ test('first-send concurrency, ownership, unchanged idempotency, retries, sequenc
     await pool.query("UPDATE agent_run SET started_at=now()-interval '3 minutes',deadline_at=now()-interval '1 minute' WHERE id=$1", [next.run.id])
     await transaction(runtime, client => syncRunTask(client, next.run.id))
     await inboxTick(runtime)
-    assert.equal((await pool.query('SELECT status FROM agent_run WHERE id=$1', [next.run.id])).rows[0].status, 'cancelled')
+    assert.equal((await pool.query('SELECT status FROM agent_run WHERE id=$1', [next.run.id])).rows[0].status, 'failed')
     const oldId = uuidv7()
     await pool.query('INSERT INTO conversation (id,org_id,user_id) VALUES ($1,$2,$3)', [oldId, f.orgId, f.userId])
     await pool.query("INSERT INTO message (id,conversation_id,role,text) VALUES ($1,$2,'user','Old history')", [uuidv7(), oldId])
@@ -198,7 +198,7 @@ test('feedback correction enforces ten-minute/community limits and falls back to
       await client.query("UPDATE agent_run SET status='running',error=NULL,finished_at=NULL,deadline_at=clock_timestamp()+interval '100 milliseconds' WHERE id=$1", [execution.run.id])
       await client.query('SELECT pg_sleep(0.15)')
       await recoverLocked(client, await lockConversation(client, f.conversationId, f.actor))
-      assert.equal((await client.query('SELECT status FROM agent_run WHERE id=$1', [execution.run.id])).rows[0].status, 'cancelled')
+      assert.equal((await client.query('SELECT status FROM agent_run WHERE id=$1', [execution.run.id])).rows[0].status, 'failed')
     })
   } finally { await f.cleanup() }
 })

@@ -31,7 +31,7 @@ const statusOptions = ['all', 'open', 'pending', 'snoozed', 'closed', 'ai_handli
 const snoozeChoices = ['hour', 'threeHours', 'tomorrow', 'monday', 'week', 'month']
 const emailSending = reactive<Record<string, boolean>>({})
 const route = useRoute()
-const { canModerate } = usePermission(
+const { canAccessInbox } = usePermission(
   computed(() => undefined),
   'post',
 )
@@ -49,7 +49,7 @@ const hasFilters = computed(() => !!filters.q.trim() || filters.status !== 'all'
 const selected = ref<string | null>(null)
 const detail = ref<InboxDetail | null>(null)
 function showSystemNotice(part: Content['parts'][number]) {
-  return part.type === 'system_event' && (part.kind === 'handoff'
+  return part.type === 'system_event' && ((part.kind === 'handoff' && part.reason !== 'ai_error')
     || (part.reason === 'manual' && (part.kind === 'snoozed' || part.kind === 'closed')))
 }
 function handoffNotice(part: SystemEventPart) {
@@ -376,7 +376,7 @@ onMounted(() => {
   updateWidth()
   media.addEventListener('change', updateWidth)
   document.addEventListener('visibilitychange', reportRead)
-  if (!canModerate.value) return
+  if (!canAccessInbox.value) return
   void refreshBadge()
   if (typeof route.query.conversationId === 'string') void open(route.query.conversationId)
   polling = setInterval(async () => {
@@ -401,7 +401,7 @@ onBeforeUnmount(() => {
 
 const { data: initialList, error: initialListError } = await useFetch<{ items: typeof rows.value; nextCursor: string | null }>('/api/admin/inbox/conversations', {
   query: { ...filters },
-  immediate: canModerate.value,
+  immediate: canAccessInbox.value,
 })
 if (initialList.value) {
   rows.value = initialList.value.items
@@ -412,7 +412,7 @@ loading.value = false
 </script>
 
 <template>
-  <div v-if="!canModerate" class="p-8">{{ t('inbox.forbidden') }}</div>
+  <div v-if="!canAccessInbox" class="p-8">{{ t('inbox.forbidden') }}</div>
   <div v-else class="flex h-full min-h-0 flex-col bg-background" data-inbox>
     <div v-if="error" role="alert" class="border-b bg-destructive/10 px-4 py-2 text-xs text-destructive">{{ error }}</div>
     <div class="flex min-h-0 flex-1">

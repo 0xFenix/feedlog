@@ -47,6 +47,7 @@ async function handleSignOut() {
 }
 
 const { mainNav, settingsNav, developerNav } = useDashboardNav()
+const { canVisit, guardNavigation } = useDashboardAccess()
 
 // Mobile menu
 const mobileMenuOpen = ref(false)
@@ -72,11 +73,11 @@ useHead({ title: () => navTitle.value })
 // Developer section: collapsed by default, but auto-expanded when the current
 // route lives inside it (so the active page stays visible).
 const { count: inboxCount, refresh: refreshInboxCount } = useInboxBadge()
-const { canModerate } = usePermission(computed(() => undefined), 'post')
+const { canAccessInbox } = usePermission(computed(() => undefined), 'post')
 let inboxTimer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
-  if (canModerate.value) void refreshInboxCount()
-  inboxTimer = setInterval(() => { if (!document.hidden && canModerate.value) void refreshInboxCount() }, 10000)
+  if (canAccessInbox.value) void refreshInboxCount()
+  inboxTimer = setInterval(() => { if (!document.hidden && canAccessInbox.value) void refreshInboxCount() }, 10000)
 })
 onBeforeUnmount(() => clearInterval(inboxTimer))
 const developerOpen = ref(developerNav.value.some(item => route.path.startsWith(item.to)))
@@ -127,8 +128,10 @@ const developerOpen = ref(developerNav.value.some(item => route.path.startsWith(
                 v-for="item in mainNav"
                 :key="item.to"
                 :to="localePath(item.to)"
+                :aria-disabled="!canVisit(item.to)"
                 class="flex items-center gap-3 px-3 py-2 rounded-lg text-muted-foreground hover:bg-background hover:text-foreground transition-colors font-semibold"
                 active-class="!bg-secondary !text-primary !font-bold"
+                @click.capture="guardNavigation($event, item.to)"
               >
                 <Icon :name="item.icon" size="20" />
                 <span class="text-sm">{{ item.label }}</span><span v-if="item.to === '/dashboard/inbox' && inboxCount" class="ml-auto inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-primary text-[10px] leading-none text-primary-foreground" :aria-label="$t('inbox.unreadOpenCount', { count: inboxCount })"><span class="relative top-px tabular-nums">{{ inboxCount > 99 ? '99+' : inboxCount }}</span></span>
@@ -142,8 +145,10 @@ const developerOpen = ref(developerNav.value.some(item => route.path.startsWith(
                 v-for="item in settingsNav"
                 :key="item.to"
                 :to="localePath(item.to)"
+                :aria-disabled="!canVisit(item.to)"
                 class="flex items-center gap-3 px-3 py-2 rounded-lg text-muted-foreground hover:bg-background hover:text-foreground transition-colors font-semibold"
                 active-class="!bg-secondary !text-primary !font-bold"
+                @click.capture="guardNavigation($event, item.to)"
               >
                 <Icon :name="item.icon" size="20" />
                 <span class="text-sm">{{ item.label }}</span><span v-if="item.to === '/dashboard/inbox' && inboxCount" class="ml-auto inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-primary text-[10px] leading-none text-primary-foreground" :aria-label="$t('inbox.unreadOpenCount', { count: inboxCount })"><span class="relative top-px tabular-nums">{{ inboxCount > 99 ? '99+' : inboxCount }}</span></span>
@@ -167,8 +172,10 @@ const developerOpen = ref(developerNav.value.some(item => route.path.startsWith(
                 v-for="item in developerNav"
                 :key="item.to"
                 :to="localePath(item.to)"
+                :aria-disabled="!canVisit(item.to)"
                 class="flex items-center gap-3 px-3 py-2 rounded-lg text-muted-foreground hover:bg-background hover:text-foreground transition-colors font-semibold"
                 active-class="!bg-secondary !text-primary !font-bold"
+                @click.capture="guardNavigation($event, item.to)"
               >
                 <Icon :name="item.icon" size="20" />
                 <span class="text-sm">{{ item.label }}</span><span v-if="item.to === '/dashboard/inbox' && inboxCount" class="ml-auto inline-flex size-6 shrink-0 items-center justify-center rounded-full bg-primary text-[10px] leading-none text-primary-foreground" :aria-label="$t('inbox.unreadOpenCount', { count: inboxCount })"><span class="relative top-px tabular-nums">{{ inboxCount > 99 ? '99+' : inboxCount }}</span></span>
@@ -250,9 +257,11 @@ const developerOpen = ref(developerNav.value.some(item => route.path.startsWith(
               v-for="item in mainNav"
               :key="item.to"
               :to="localePath(item.to)"
+              :aria-disabled="!canVisit(item.to)"
               class="relative flex items-center gap-3 py-2 rounded-lg justify-center min-[1360px]:justify-start px-0 min-[1360px]:px-3 text-muted-foreground hover:bg-background hover:text-foreground transition-colors font-semibold"
               :title="item.label"
               active-class="!bg-secondary !text-primary !font-bold"
+              @click.capture="guardNavigation($event, item.to)"
             >
               <Icon :name="item.icon" size="20" class="shrink-0" />
               <span class="hidden min-[1360px]:inline text-sm">{{ item.label }}</span>
@@ -269,9 +278,11 @@ const developerOpen = ref(developerNav.value.some(item => route.path.startsWith(
               v-for="item in settingsNav"
               :key="item.to"
               :to="localePath(item.to)"
+              :aria-disabled="!canVisit(item.to)"
               class="flex items-center gap-3 py-2 rounded-lg justify-center min-[1360px]:justify-start px-0 min-[1360px]:px-3 text-muted-foreground hover:bg-background hover:text-foreground transition-colors font-semibold"
               :title="item.label"
               active-class="!bg-secondary !text-primary !font-bold"
+              @click.capture="guardNavigation($event, item.to)"
             >
               <Icon :name="item.icon" size="20" class="shrink-0" />
               <span class="hidden min-[1360px]:inline text-sm">{{ item.label }}</span>
@@ -297,9 +308,11 @@ const developerOpen = ref(developerNav.value.some(item => route.path.startsWith(
               v-for="item in developerNav"
               :key="item.to"
               :to="localePath(item.to)"
+              :aria-disabled="!canVisit(item.to)"
               class="flex items-center gap-3 py-2 rounded-lg justify-center min-[1360px]:justify-start px-0 min-[1360px]:px-3 text-muted-foreground hover:bg-background hover:text-foreground transition-colors font-semibold"
               :title="item.label"
               active-class="!bg-secondary !text-primary !font-bold"
+              @click.capture="guardNavigation($event, item.to)"
             >
               <Icon :name="item.icon" size="20" class="shrink-0" />
               <span class="hidden min-[1360px]:inline text-sm">{{ item.label }}</span>

@@ -97,9 +97,11 @@ export async function searchHelpArticles(pool: Pick<Pool, 'query'>, orgId: strin
       }
       return rows
     }
-    const vectorPromise = searchHelpVectors(pool, orgId, query, 'agent').catch(() => [])
-    const result = await searchHelpProgressively({ orgId, query, translate: true, search: run })
-    const semantic = (await vectorPromise).map(row => ({ article_id: row.articleId, title: row.title, description: row.description, content: row.content, slug: `${row.shortId}-${row.slug}`, published: row.published }))
+    const [vectors, result] = await Promise.all([
+      searchHelpVectors(pool, orgId, query, 'agent'),
+      searchHelpProgressively({ orgId, query, translate: true, search: run }),
+    ])
+    const semantic = vectors.map(row => ({ article_id: row.articleId, title: row.title, description: row.description, content: row.content, slug: `${row.shortId}-${row.slug}`, published: row.published }))
     // CJK lexical lookup uses broad OR bigrams; its first hit may match only a
     // generic word. Preserve an exact English full-text winner, not that hit.
     return { rows: fuseHelpResults(result.rows, semantic, row => row.article_id, RESULTS_PER_QUERY, !/[\u3400-\u9fff]/.test(query)), excerptTokens: splitHelpQuery([query, ...result.translatedQueries].join(' ')) }

@@ -1,6 +1,7 @@
 import { transaction } from '../agent/runtime'
 import { eventItem, recoverLocked, type ConversationRow, type InboxRuntime } from './service'
 import { deliverReplyTask } from './email'
+import { deliverHandoffEmail } from './handoff-email'
 
 export async function inboxTick(runtime: InboxRuntime) {
   const result = { closed: 0, resumed: 0, recoveredRuns: 0, emails: 0, failed: 0, hasMore: false }
@@ -20,6 +21,11 @@ export async function inboxTick(runtime: InboxRuntime) {
       (status NOT IN ('pending','processing','done','cancelled') AND schedule_at<=clock_timestamp())) RETURNING *`, [candidate.id])
     if (!task) continue
     try {
+      if (task.kind === 'inbox_handoff_email') {
+        await deliverHandoffEmail(runtime, task)
+        result.emails++
+        continue
+      }
       if (task.kind === 'inbox_email') {
         await deliverReplyTask(runtime, task)
         result.emails++

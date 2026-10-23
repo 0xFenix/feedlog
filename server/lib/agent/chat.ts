@@ -1,21 +1,32 @@
+import { watchRun } from './run-monitor'
+import { agentTiming } from './timing'
+import { AgentDependencyTimeout } from './dependency-timeout'
+import { HandoffProtocolError, handoffTextGate } from './handoff-protocol'
+import { createRunActivity } from './run-activity'
+import { startStreamHeartbeat } from './stream-heartbeat'
 import { z } from 'zod'
 import { uuidv7 } from 'uuidv7'
 import { toAISdkStream } from '@mastra/ai-sdk'
 import { createEventStream, type H3Event } from 'h3'
-import { chatInput, contentSchema } from '#layers/feedlog/shared/agent/content'
+import { chatInput, contentSchema, type Part } from '#layers/feedlog/shared/agent/content'
 import { type Actor, agentRuntime, agentError, transaction, lockConversation, appendItem } from '#layers/feedlog/server/lib/agent/runtime'
 import { handoff } from '../inbox/service'
 import { syncConversationTask, syncRunTask, replyCloseDelayMs } from '../inbox/tasks'
 import { requestSchedule } from '../inbox/platform'
-import { handling } from '../../../shared/inbox/state'
+import { handling, handoffNotice } from '../../../shared/inbox/state'
 import { publicItem, publicRun } from './runtime'
-import { startRun } from '#layers/feedlog/server/lib/agent/conversations'
+import { imageExecutionError } from './errors'
+import { ChatImageError } from '../../../shared/agent/images'
+import { startRun, failRun, renewRun } from '#layers/feedlog/server/lib/agent/conversations'
 import { prepareAgent, customerMemoryMessage } from '#layers/feedlog/server/lib/agent/agent'
 import { collectConversationReply } from '#layers/feedlog/server/lib/agent/stream'
 import { keepVerifiedHelpReferences, removeUnverifiedAnswerLinks, verifyHelpCitations } from '#layers/feedlog/server/lib/agent/citation-evidence'
 import { addTokenUsage, type RunTokenUsage } from '#layers/feedlog/shared/agent/usage'
 
-export async function streamAgentReply(event: H3Event, actor: Actor) {
+export async function streamAgentReply(event: H3Event, actor: Actor, options: { aiUnavailable?: boolean } = {}) {
+  const started = performance.now()
+  const aiConfigured = !options.aiUnavailable && !!process.env.OPENAI_API_KEY && !!process.env.OPENAI_TEXT_MODEL
+  const firstAnswerDeadline = Date.now() + 120_000
   await assertGuestMay(event, actor.session, 'allowPost')
   const parsedId = z.uuid().safeParse(getRouterParam(event, 'id'))
   if (!parsedId.success) agentError(404, 'conversation_not_found', 'Conversation not found')
@@ -23,13 +34,26 @@ export async function streamAgentReply(event: H3Event, actor: Actor) {
   const parsed = chatInput.safeParse(await readBody(event).catch(() => null))
   if (!parsed.success) agentError(422, 'invalid_message', 'Message content or parameters are invalid')
   const runtime = agentRuntime(event)
+  let preparedMessage: Awaited<ReturnType<typeof customerMemoryMessage>> | undefined
   if (parsed.data.action === 'send') {
-    // Validate attachment access before committing the input or starting a run.
-    await customerMemoryMessage(event, { ...parsed.data.message, author_user_id: actor.customerId, conversation_id: id, seq: 0, created_at: new Date() }, `${actor.orgId}:${id}`, actor.orgId)
-      .catch(() => agentError(422, 'invalid_message', 'An image could not be read'))
+    // Model restrictions do not change attachment handling in an existing human conversation.
+    const { rows: [current] } = parsed.data.message.content.parts.some(part => part.type === 'image')
+      ? await runtime.pool.query('SELECT status FROM conversation WHERE id=$1 AND org_id=$2 AND user_id=$3', [id, actor.orgId, actor.customerId])
+      : { rows: [] }
+    const forModel = aiConfigured && (!current || ['ai_handling', 'closed'].includes(current.status))
+    const disconnected = new AbortController()
+    const onClose = () => disconnected.abort(new Error('Request disconnected'))
+    event.node.res.once('close', onClose)
+    try {
+      const signal = AbortSignal.any([disconnected.signal, AbortSignal.timeout(Math.max(0, firstAnswerDeadline - Date.now()))])
+      preparedMessage = await customerMemoryMessage(event, { ...parsed.data.message, conversation_id: id, seq: 0, created_at: new Date() }, `${actor.orgId}:${id}`, actor.orgId, false, forModel, signal, true)
+        .catch(error => agentError(422, error instanceof ChatImageError ? error.code : 'image_unavailable', 'Please replace or remove the image and try again'))
+      signal.throwIfAborted()
+    } finally { event.node.res.removeListener('close', onClose) }
+    if (!forModel) preparedMessage = undefined
   }
   if (!await checkRateLimit(`widget-messages:${actor.customerId}`, { limit: 20, windowSeconds: 60 })) agentError(429, 'rate_limited', 'Too many messages; try again shortly')
-  const execution = await startRun(runtime, id, actor, parsed.data)
+  const execution = await startRun(runtime, id, actor, parsed.data, firstAnswerDeadline)
   if (execution.run && !execution.duplicate) await requestSchedule(event)
   if (execution.duplicate || !execution.run) return {
     accepted: true, duplicate: execution.duplicate, mode: execution.mode,
@@ -39,40 +63,79 @@ export async function streamAgentReply(event: H3Event, actor: Actor) {
   const { run, item } = execution
   const replyId = uuidv7()
   const stream = createEventStream(event)
+  const stopHeartbeat = startStreamHeartbeat(stream)
   const send = (name: string, data: unknown) => stream.push({ event: name, data: JSON.stringify(data) }).catch(() => {})
   const task = (async () => {
     const controller = new AbortController()
-    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(Math.max(1, new Date(run.deadline_at).getTime() - Date.now()))])
-    let checking = false
-    const watch = setInterval(async () => {
-      if (checking) return
-      checking = true
-      try {
-        const { rows: [active] } = await runtime.pool.query("SELECT id FROM agent_run WHERE id=$1 AND status='running'", [run.id])
-        if (!active) controller.abort()
-      } catch { controller.abort() }
-      finally { checking = false }
-    }, 1000)
+    const activity = createRunActivity(new Date(run.deadline_at).getTime())
+    const signal = AbortSignal.any([controller.signal, activity.signal])
+    let persistedDeadline = new Date(run.deadline_at).getTime()
+    let progressWrite = Promise.resolve()
+    let lastPersistedAt = Date.now()
+    const persistProgress = () => {
+      progressWrite = progressWrite.then(async () => {
+        signal.throwIfAborted()
+        const deadline = activity.deadline()
+        if (deadline <= persistedDeadline || Date.now() - lastPersistedAt < 5000) return
+        if (!await renewRun(runtime, id, actor, run.id, deadline)) {
+          controller.abort()
+          signal.throwIfAborted()
+        }
+        persistedDeadline = deadline
+        lastPersistedAt = Date.now()
+      })
+      return progressWrite
+    }
+    const answerProgress = (text: string) => { activity.answer(text); return persistProgress() }
+    const stopWatching = watchRun(runtime.pool, run.id, persistProgress, () => controller.abort())
     let usage: RunTokenUsage | null = null
+    let usageWrite = Promise.resolve()
+    const recordUsage = (step: { inputTokens?: number; outputTokens?: number }) => {
+      usage = addTokenUsage(usage, step)
+      const snapshot = JSON.stringify(usage)
+      // Parallel image batches must not overwrite a newer usage total with an older one.
+      usageWrite = usageWrite.then(async () => {
+        await runtime.pool.query('UPDATE agent_run SET usage=$2 WHERE id=$1', [run.id, snapshot])
+          .catch(() => console.warn('[agent] Could not persist token usage', { runId: run.id }))
+      })
+      return usageWrite
+    }
+    let handoffUnavailable = false
     let prepared: Awaited<ReturnType<typeof prepareAgent>> | undefined
     try {
-      await send('run', { runId: run.id, itemId: replyId })
-      prepared = await prepareAgent(event, actor, id, run, item, signal, () => {}, () => controller.abort())
+      await send('run', { runId: run.id, itemId: replyId, run: publicRun(run) })
+      if (!aiConfigured) throw new Error('AI unavailable')
+      prepared = await prepareAgent(event, actor, id, run, item, signal, () => {}, unavailable => { handoffUnavailable = !!unavailable; controller.abort() }, recordUsage, preparedMessage, () => controller.abort())
+      let firstText = true
       let failed = false
+      let executionError: unknown
+      const modelController = new AbortController()
+      const modelSignal = AbortSignal.any([signal, modelController.signal])
       const output = await prepared.agent.stream([prepared.input], {
         runId: run.id, memory: { thread: id, resource: prepared.resourceId, options: { lastMessages: prepared.historySize } },
-        maxSteps: 12, toolCallConcurrency: 1, abortSignal: signal, onError: () => { failed = true }, onAbort: () => { failed = true },
-        onStepFinish: async step => {
-          usage = addTokenUsage(usage, step.usage)
-          // Preserve reported costs even when a later step fails; metrics must not interrupt a reply.
-          await runtime.pool.query('UPDATE agent_run SET usage=$2 WHERE id=$1', [run.id, JSON.stringify(usage)])
-            .catch(() => console.warn('[agent] Could not persist step token usage', { runId: run.id }))
-        },
+        maxSteps: 12, toolCallConcurrency: 1, abortSignal: modelSignal, onError: error => { failed = true; executionError = error }, onAbort: () => { failed = true },
+        onStepFinish: step => recordUsage(step.usage),
       })
-      const reply = await collectConversationReply(toAISdkStream(output, { from: 'agent', version: 'v7', sendReasoning: false, sendSources: false }), replyId, chunk => {
-        if (chunk.type === 'text-delta') void send('text', { runId: run.id, itemId: replyId, delta: chunk.delta })
+      const gate = handoffTextGate()
+      const writeText = async (delta: string) => {
+        if (!delta) return
+        if (firstText) { firstText = false; agentTiming('first_answer', { runId: run.id, elapsedMs: Math.round(performance.now() - started) }) }
+        await answerProgress(delta)
+        await send('text', { runId: run.id, itemId: replyId, delta })
+      }
+      const reply = await collectConversationReply(toAISdkStream(output, { from: 'agent', version: 'v7', sendReasoning: false, sendSources: false }), replyId, async chunk => {
+        if (chunk.type === 'text-delta') await writeText(gate.push(chunk.delta))
+      }).catch(async error => {
+        if (error instanceof HandoffProtocolError) {
+          modelController.abort()
+          console.warn('[agent] Recovering malformed handoff protocol', { runId: run.id, model: process.env.OPENAI_TEXT_MODEL })
+          await send('reset', { runId: run.id })
+          await prepared!.recoverHandoff()
+        }
+        throw error
       })
-      if (failed || signal.aborted) throw new Error('Model execution did not complete')
+      await writeText(gate.finish())
+      if (failed || signal.aborted) throw executionError ?? new Error('Model execution did not complete')
       await runtime.memory.settled()
       let text = reply.message.parts.filter(part => part.type === 'text').map(part => part.text).join('\n\n').trim()
       let parts = await prepared.resultParts()
@@ -83,9 +146,9 @@ export async function streamAgentReply(event: H3Event, actor: Actor) {
           'SELECT id,title,content FROM help_article WHERE id=ANY($1::uuid[]) AND org_id=$2 AND ai_enabled',
           [citedIds, actor.orgId],
         )
-        const question = item.content.parts.filter(part => part.type === 'text').map(part => part.text).join('\n')
+        const question = item.content.parts.filter((part: Part) => part.type === 'text').map((part: { text: string }) => part.text).join('\n')
         const verdict = await verifyHelpCitations(question, text, candidates, {
-          timeoutMs: Math.max(1000, Math.min(12000, new Date(run.deadline_at).getTime() - Date.now() - 1000)),
+          timeoutMs: Math.max(1000, Math.min(12000, activity.deadline() - Date.now() - 1000)),
         })
         if (verdict.status === 'unavailable') console.warn('[agent] Citation verification unavailable', { runId: run.id })
         const verifiedIds = new Set(verdict.matches.map(match => match.id))
@@ -105,19 +168,56 @@ export async function streamAgentReply(event: H3Event, actor: Actor) {
         return Number(reply.seq)
       })
       await requestSchedule(event)
-      await send('finish', { runId: run.id, itemId: replyId, lastSeq })
-    } catch {
+      agentTiming('run_complete', { runId: run.id, elapsedMs: Math.round(performance.now() - started) })
+      await send('finish', { runId: run.id, itemId: replyId, lastSeq, content })
+    } catch (error) {
+      agentTiming('run_failed', { runId: run.id, elapsedMs: Math.round(performance.now() - started), deadlineExpired: activity.signal.aborted, dependencyTimeout: error instanceof AgentDependencyTimeout })
       try {
-        const feedbackResults = await prepared?.feedbackResults().catch(() => []) ?? []
-        await handoff(runtime, id, actor.orgId, run.id, 'ai_error', true, undefined, feedbackResults)
-        const { rows: [current] } = await runtime.pool.query('SELECT status,last_seq FROM conversation WHERE id=$1 AND org_id=$2', [id, actor.orgId])
-        if (current && current.status !== 'ai_handling') {
-          await send(current.status === 'closed' ? 'closed' : 'handoff', { runId: run.id, noticeItemId: `handoff:${run.id}`, lastSeq: Number(current.last_seq), handling: handling(current.status) })
+        if (handoffUnavailable) {
+          await failRun(runtime, run.id, 'support_unavailable').catch(() => console.warn('[inbox] Could not persist unavailable handoff', { runId: run.id }))
+          await send('handoff_unavailable', { runId: run.id })
+          return
         }
+        const imageError = imageExecutionError(error)
+        if (imageError) {
+          await failRun(runtime, run.id, imageError.code)
+          await send('error', { runId: run.id, code: imageError.code, message: 'Please replace the image and try again.' })
+          return
+        }
+        const { rows: [activeRun] } = await runtime.pool.query('SELECT status,error FROM agent_run WHERE id=$1', [run.id])
+        if (activeRun?.error === 'support_unavailable') {
+          await send('handoff_unavailable', { runId: run.id })
+          return
+        }
+        // A tool may have already handed off or closed the conversation.
+        if (aiConfigured && ['running', 'failed'].includes(activeRun?.status)) {
+          const timedOut = activity.signal.aborted || activeRun.error === 'ai_timeout' || error instanceof AgentDependencyTimeout || (error instanceof Error && error.name === 'TimeoutError')
+          const code = timedOut ? 'ai_timeout' : 'ai_error'
+          await failRun(runtime, run.id, code)
+          await send('error', { runId: run.id, code, message: 'The response could not be completed. Please try again.' })
+          return
+        }
+        const feedbackResults = await prepared?.feedbackResults().catch(() => []) ?? []
+        try {
+          await handoff(runtime, id, actor.orgId, run.id, 'ai_error', true, undefined, feedbackResults, getRequestURL(event).origin)
+        } catch {
+          await failRun(runtime, run.id, 'support_unavailable').catch(() => {})
+          await send('handoff_unavailable', { runId: run.id })
+          return
+        }
+        const { rows: [current] } = await runtime.pool.query(`SELECT c.status,c.last_seq,i.content FROM conversation c
+          LEFT JOIN conversation_item i ON i.id=$3 AND i.conversation_id=c.id WHERE c.id=$1 AND c.org_id=$2`, [id, actor.orgId, `handoff:${run.id}`])
+        const noticePart = current?.content?.parts?.find((part: { kind?: string }) => part.kind === 'handoff')
+        const reason = noticePart?.reason
+        if (current && current.status !== 'ai_handling') {
+          await send(current.status === 'closed' ? 'closed' : 'handoff', { runId: run.id, noticeItemId: `handoff:${run.id}`, lastSeq: Number(current.last_seq), handling: handling(current.status), ...(reason === 'ai_error' ? { reason } : { handoffNotice: handoffNotice(reason, noticePart?.rule?.id) }) })
+        }
+        if (current?.status === 'ai_handling') await send('handoff_unavailable', { runId: run.id })
+        await requestSchedule(event)
         // A closed conversation may already have reopened. Never let the old run
         // announce a handoff or append a reply into that new round.
       } catch { await send('error', { runId: run.id, code: 'storage_unavailable', message: 'Connection interrupted. Please retry with the same message.' }) }
-    } finally { clearInterval(watch); await stream.close() }
+    } finally { stopHeartbeat(); activity.dispose(); stopWatching(); await stream.close() }
   })()
   event.context.feedlogAgentTask = task
   event.waitUntil(task)
