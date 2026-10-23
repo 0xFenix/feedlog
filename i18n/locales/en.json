@@ -610,7 +610,9 @@
       "guideMatchedByPre": "Users are matched by ",
       "guideMatchedByEmail": "email",
       "guideMatchedByPost": ". A first-time email creates an end-user account (no extra login screen); changing a user's email creates a new account and does not migrate history."
-    }
+    },
+    "accessDenied": "You do not have access to this page",
+    "requestAccess": "Ask a workspace owner or administrator to update your permissions."
   },
   "settings": {
     "loading": "Loading…",
@@ -881,6 +883,7 @@
     "loadFailed": "Could not load your feedback.",
     "attachImage": "Attach image",
     "uploadFailed": "Could not upload that image. Please try again.",
+    "imageUploadFailed": "Image {number} ({name}): {message}",
     "uploadTooLarge": "Images must be smaller than {size}MB.",
     "messages": "Messages",
     "agentTitle": "{product} Assistant",
@@ -901,9 +904,11 @@
     "openArticle": "Open article in a new tab",
     "articleUnavailable": "This article is no longer available.",
     "earlierMessages": "Earlier messages",
+    "replyTimeout": "The response timed out. Please retry.",
+    "replyInterrupted": "The response was interrupted. Please retry.",
     "retryReply": "Retry reply",
     "refreshStatus": "Refresh status",
-    "tooManyParts": "Attach fewer images. A message can contain up to 10 parts.",
+    "tooManyParts": "You can attach up to 10 images per message. Remove extra images and try again.",
     "actions": {
       "feedback_created": "Feedback created",
       "feedback_updated": "Feedback edited",
@@ -912,12 +917,24 @@
       "feedback_comment_updated": "Comment edited"
     },
     "conversationNotices": {
-      "handoff": "Your question has been passed to our support team. You can send more details or screenshots here."
+      "handoff": "Your question has been passed to our support team. You can send more details or screenshots here.",
+      "handoffBilling": "This issue requires our support team to review your account or billing. It has been passed to them. You can add more details here.",
+      "handoffAccount": "This issue requires our support team to review your account. It has been passed to them. You can add more details here.",
+      "handoffPrivacy": "This request requires our support team to handle it. It has been passed to them. You can add more details about your request here.",
+      "handoffRule": "This issue requires further assistance from our support team. It has been passed to them. You can add more details here."
     },
     "messageYou": "You",
     "messageAI": "FeedLog AI",
     "messageStaffNamed": "{name}",
-    "messageStaff": "Support"
+    "messageStaff": "Support",
+    "supportUnavailable": "Support is currently unavailable. Your message is saved; please try again later.",
+    "imageErrors": {
+      "image_unsupported": "This image could not be converted. Try exporting it as JPEG or PNG.",
+      "image_invalid": "This image cannot be read. Please choose another file.",
+      "image_too_large": "This image is too large to process. Choose an image under 32 MB or export a smaller JPEG/PNG.",
+      "image_total_too_large": "These images are too large together. Remove some attachments and try again.",
+      "image_unavailable": "This attachment is no longer available. Remove it and upload it again."
+    }
   },
   "help": {
     "admin": {

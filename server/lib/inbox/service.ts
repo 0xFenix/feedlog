@@ -1,4 +1,5 @@
 import { queueInboxEvent } from './events'
+import { hasHumanSupport, scheduleHandoffEmail } from './handoff-email'
 import { syncConversationTask, syncRunTask, scheduleReplyEmail, replyCloseDelayMs } from './tasks'
 import { createHash } from 'node:crypto'
 import { uuidv7 } from 'uuidv7'
@@ -75,6 +76,7 @@ export async function handoffLocked(
   allowExpired = false,
   rule?: HandoffRule,
   feedbackResults: FeedbackPart[] = [],
+  requestOrigin?: string,
 ) {
   const id = `handoff:${runId}`
   const {
@@ -87,6 +89,11 @@ export async function handoffLocked(
     [runId, row.id, allowExpired],
   )
   if (!rowCount) return null
+  if (!await hasHumanSupport(client, row.org_id)) {
+    await client.query("UPDATE agent_run SET status='failed',error='support_unavailable',finished_at=clock_timestamp() WHERE id=$1 AND status='running'", [runId])
+    await syncRunTask(client, runId)
+    return null
+  }
   // Successful business actions survive cancellation, including their visible receipts.
   if (feedbackResults.length) await appendItem(client, {
     id: `handoff-results:${runId}`, conversationId: row.id, author: 'agent',
@@ -113,7 +120,9 @@ export async function handoffLocked(
     userId: null,
     data: { conversationId: row.id, reason },
   })
-  return eventItem(client, row.id, { kind: 'handoff', reason, ...(reason === 'support_rule' && rule ? { rule } : {}), fromStatus: row.status, toStatus: 'open' }, { id })
+  const notice = await eventItem(client, row.id, { kind: 'handoff', reason, ...(reason === 'support_rule' && rule ? { rule } : {}), fromStatus: row.status, toStatus: 'open' }, { id })
+  await scheduleHandoffEmail(client, runId, requestOrigin)
+  return notice
 }
 export async function handoff(
   runtime: InboxRuntime,
@@ -124,9 +133,10 @@ export async function handoff(
   allowExpired = false,
   rule?: HandoffRule,
   feedbackResults: FeedbackPart[] = [],
+  requestOrigin?: string,
 ) {
   const save = (expired: boolean) => transaction(runtime, async (client) =>
-    handoffLocked(client, await lockInbox(client, id, orgId), runId, reason, expired, rule, feedbackResults),
+    handoffLocked(client, await lockInbox(client, id, orgId), runId, reason, expired, rule, feedbackResults, requestOrigin),
   )
   try { return await save(allowExpired) }
   catch {
@@ -144,8 +154,10 @@ export async function recoverLocked(client: PoolClient, row: ConversationRow) {
     [row.id],
   )
   if (!run) return false
-  if (row.status === 'ai_handling') await handoffLocked(client, row, run.id, 'ai_error', true)
-  else await cancelRun(client, row.id)
+  if (row.status === 'ai_handling') {
+    await client.query("UPDATE agent_run SET status='failed',error='ai_timeout',finished_at=clock_timestamp() WHERE id=$1 AND status='running'", [run.id])
+    await syncRunTask(client, run.id)
+  } else await cancelRun(client, row.id)
   return true
 }
 function canonical(value: unknown): string {

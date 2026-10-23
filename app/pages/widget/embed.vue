@@ -317,12 +317,14 @@ onMounted(async () => {
   const config = $fetch<{
     org: { name: string, logo: string | null }
     allowGuest: boolean
+    imageMaxBytes?: number
     branding: { primary: string, primaryForeground: string }
   }>('/api/widget/config')
     .then((cfg) => {
       applyBrand(cfg.branding)
       org.value = cfg.org
       allowGuest.value = cfg.allowGuest
+      if (cfg.imageMaxBytes) embed.imageMaxBytes.value = cfg.imageMaxBytes
     })
     .catch(() => {})
 

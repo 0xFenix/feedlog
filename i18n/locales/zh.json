@@ -610,7 +610,9 @@
       "guideMatchedByPre": "用户通过",
       "guideMatchedByEmail": "邮箱",
       "guideMatchedByPost": "匹配。首次使用的邮箱会创建终端用户账户(无需额外登录界面);更改用户邮箱会创建新账户,且不会迁移历史记录。"
-    }
+    },
+    "accessDenied": "你没有访问此页面的权限",
+    "requestAccess": "请联系工作区所有者或管理员调整你的权限。"
   },
   "settings": {
     "loading": "加载中……",
@@ -881,6 +883,7 @@
     "loadFailed": "加载反馈失败。",
     "attachImage": "添加图片",
     "uploadFailed": "图片上传失败,请重试。",
+    "imageUploadFailed": "第 {number} 张图片「{name}」：{message}",
     "uploadTooLarge": "图片不能超过 {size}MB。",
     "messages": "消息",
     "agentTitle": "{product} 助手",
@@ -901,9 +904,11 @@
     "openArticle": "在新标签页打开文章",
     "articleUnavailable": "这篇文章已无法访问。",
     "earlierMessages": "更早的消息",
+    "replyTimeout": "回复超时，请重试。",
+    "replyInterrupted": "回复已中断，请重试。",
     "retryReply": "重试回复",
     "refreshStatus": "刷新状态",
-    "tooManyParts": "请减少图片数量，每条消息最多包含 10 个内容块。",
+    "tooManyParts": "每条消息最多上传 10 张图片，请减少图片数量后重试。",
     "actions": {
       "feedback_created": "已创建反馈",
       "feedback_updated": "已修改反馈",
@@ -912,12 +917,24 @@
       "feedback_comment_updated": "已修改评论"
     },
     "conversationNotices": {
-      "handoff": "你的问题已转交人工客服。你可以继续在这里发送消息，补充相关情况或截图。"
+      "handoff": "你的问题已转交人工客服。你可以继续在这里发送消息，补充相关情况或截图。",
+      "handoffBilling": "这个问题需要人工客服核查账户或账单，已为你转交。你可以继续在这里补充相关情况。",
+      "handoffAccount": "这个问题需要人工客服核查账户情况，已为你转交。你可以继续在这里补充相关情况。",
+      "handoffPrivacy": "这项申请需要人工客服处理，已为你转交。你可以继续在这里补充申请说明。",
+      "handoffRule": "这个问题需要人工客服进一步处理，已为你转交。你可以继续在这里补充相关情况。"
     },
     "messageYou": "你",
     "messageAI": "FeedLog AI",
     "messageStaffNamed": "{name}",
-    "messageStaff": "客服"
+    "messageStaff": "客服",
+    "supportUnavailable": "客服暂时不可用。你的消息已保存，请稍后再试。",
+    "imageErrors": {
+      "image_unsupported": "这张图片无法转换，请导出为 JPEG 或 PNG 后重试。",
+      "image_invalid": "无法读取这张图片，请更换文件。",
+      "image_too_large": "图片过大，暂时无法处理。请选择小于 32 MB 的图片，或导出尺寸更小的 JPEG/PNG。",
+      "image_total_too_large": "图片总大小超出限制，请移除部分附件后重试。",
+      "image_unavailable": "这张附件已不可用，请移除后重新上传。"
+    }
   },
   "help": {
     "admin": {
