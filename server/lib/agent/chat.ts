@@ -9,15 +9,14 @@ import { uuidv7 } from 'uuidv7'
 import { toAISdkStream } from '@mastra/ai-sdk'
 import { createEventStream, type H3Event } from 'h3'
 import { chatInput, contentSchema, type Part } from '#layers/feedlog/shared/agent/content'
-import { type Actor, agentRuntime, agentError, transaction, lockConversation, appendItem } from '#layers/feedlog/server/lib/agent/runtime'
+import { type Actor, agentRuntime, agentError } from '#layers/feedlog/server/lib/agent/runtime'
 import { handoff } from '../inbox/service'
-import { syncConversationTask, syncRunTask, replyCloseDelayMs } from '../inbox/tasks'
 import { requestSchedule } from '../inbox/platform'
 import { handling, handoffNotice } from '../../../shared/inbox/state'
 import { publicItem, publicRun } from './runtime'
 import { imageExecutionError } from './errors'
 import { ChatImageError } from '../../../shared/agent/images'
-import { startRun, failRun, renewRun } from '#layers/feedlog/server/lib/agent/conversations'
+import { startRun, failRun, completeRun, renewRun, readStoppedRun } from '#layers/feedlog/server/lib/agent/conversations'
 import { prepareAgent, customerMemoryMessage } from '#layers/feedlog/server/lib/agent/agent'
 import { collectConversationReply } from '#layers/feedlog/server/lib/agent/stream'
 import { keepVerifiedHelpReferences, removeUnverifiedAnswerLinks, verifyHelpCitations } from '#layers/feedlog/server/lib/agent/citation-evidence'
@@ -65,6 +64,19 @@ export async function streamAgentReply(event: H3Event, actor: Actor, options: { 
   const stream = createEventStream(event)
   const stopHeartbeat = startStreamHeartbeat(stream)
   const send = (name: string, data: unknown) => stream.push({ event: name, data: JSON.stringify(data) }).catch(() => {})
+  const sendTakeover = (notice: { id: string; seq: number }) => send('handoff', { runId: run.id, lastSeq: notice.seq, handling: 'human' })
+  const failAndTakeOver = async (code: string) => {
+    const notice = await failRun(runtime, run.id, code)
+    if (notice) { await sendTakeover(notice); return true }
+    const current = await readStoppedRun(runtime, id, actor.orgId, run.id)
+    if (!current) { await send('superseded', { runId: run.id }); return true }
+    if (current.status === 'closed') { await send('closed', { runId: run.id, lastSeq: Number(current.last_seq), handling: 'closed' }); return true }
+    if (current.notice_id && current.status !== 'ai_handling' && current.content?.parts.some(part => part.type === 'system_event' && part.kind === 'takeover')) {
+      await sendTakeover({ id: current.notice_id, seq: Number(current.last_seq) })
+      return true
+    }
+    return false
+  }
   const task = (async () => {
     const controller = new AbortController()
     const activity = createRunActivity(new Date(run.deadline_at).getTime())
@@ -156,36 +168,28 @@ export async function streamAgentReply(event: H3Event, actor: Actor, options: { 
         text = removeUnverifiedAnswerLinks(text, candidates, verifiedIds)
       }
       const content = contentSchema.parse({ parts: [...(text ? [{ type: 'text', text }] : []), ...parts] })
-      const lastSeq = await transaction(runtime, async client => {
-        await lockConversation(client, id, actor)
-        const { rowCount } = await client.query("SELECT id FROM agent_run WHERE id=$1 AND status='running' AND deadline_at>clock_timestamp()", [run.id])
-        if (!rowCount) throw new Error('Run no longer active')
-        const reply = await appendItem(client, { id: replyId, conversationId: id, author: 'agent', content, runId: run.id })
-        await client.query("UPDATE conversation SET state_due_at=$2::timestamptz WHERE id=$1 AND status='ai_handling'", [id, new Date(new Date(reply.created_at).getTime() + replyCloseDelayMs())])
-        await client.query("UPDATE agent_run SET status='completed',finished_at=now(),usage=$2 WHERE id=$1", [run.id, usage ? JSON.stringify(usage) : null])
-        await syncConversationTask(client, id)
-        await syncRunTask(client, run.id)
-        return Number(reply.seq)
-      })
+      const { lastSeq, takeover } = await completeRun(runtime, id, actor, run.id, replyId, content, usage)
       await requestSchedule(event)
       agentTiming('run_complete', { runId: run.id, elapsedMs: Math.round(performance.now() - started) })
       await send('finish', { runId: run.id, itemId: replyId, lastSeq, content })
+      if (takeover) await sendTakeover(takeover)
     } catch (error) {
       agentTiming('run_failed', { runId: run.id, elapsedMs: Math.round(performance.now() - started), deadlineExpired: activity.signal.aborted, dependencyTimeout: error instanceof AgentDependencyTimeout })
       try {
         if (handoffUnavailable) {
-          await failRun(runtime, run.id, 'support_unavailable').catch(() => console.warn('[inbox] Could not persist unavailable handoff', { runId: run.id }))
+          if (await failAndTakeOver('support_unavailable')) return
           await send('handoff_unavailable', { runId: run.id })
           return
         }
         const imageError = imageExecutionError(error)
         if (imageError) {
-          await failRun(runtime, run.id, imageError.code)
+          if (await failAndTakeOver(imageError.code)) return
           await send('error', { runId: run.id, code: imageError.code, message: 'Please replace the image and try again.' })
           return
         }
         const { rows: [activeRun] } = await runtime.pool.query('SELECT status,error FROM agent_run WHERE id=$1', [run.id])
         if (activeRun?.error === 'support_unavailable') {
+          if (await failAndTakeOver('support_unavailable')) return
           await send('handoff_unavailable', { runId: run.id })
           return
         }
@@ -193,7 +197,7 @@ export async function streamAgentReply(event: H3Event, actor: Actor, options: { 
         if (aiConfigured && ['running', 'failed'].includes(activeRun?.status)) {
           const timedOut = activity.signal.aborted || activeRun.error === 'ai_timeout' || error instanceof AgentDependencyTimeout || (error instanceof Error && error.name === 'TimeoutError')
           const code = timedOut ? 'ai_timeout' : 'ai_error'
-          await failRun(runtime, run.id, code)
+          if (await failAndTakeOver(code)) return
           await send('error', { runId: run.id, code, message: 'The response could not be completed. Please try again.' })
           return
         }
@@ -201,16 +205,17 @@ export async function streamAgentReply(event: H3Event, actor: Actor, options: { 
         try {
           await handoff(runtime, id, actor.orgId, run.id, 'ai_error', true, undefined, feedbackResults, getRequestURL(event).origin)
         } catch {
-          await failRun(runtime, run.id, 'support_unavailable').catch(() => {})
+          if (await failAndTakeOver('support_unavailable')) return
           await send('handoff_unavailable', { runId: run.id })
           return
         }
-        const { rows: [current] } = await runtime.pool.query(`SELECT c.status,c.last_seq,i.content FROM conversation c
-          LEFT JOIN conversation_item i ON i.id=$3 AND i.conversation_id=c.id WHERE c.id=$1 AND c.org_id=$2`, [id, actor.orgId, `handoff:${run.id}`])
-        const noticePart = current?.content?.parts?.find((part: { kind?: string }) => part.kind === 'handoff')
-        const reason = noticePart?.reason
+        const current = await readStoppedRun(runtime, id, actor.orgId, run.id)
+        if (!current) { await send('superseded', { runId: run.id }); return }
+        const noticePart = current.content?.parts.find(part => part.type === 'system_event' && ['handoff', 'takeover'].includes(part.kind))
+        const notice = noticePart?.type === 'system_event' ? noticePart : undefined
+        const reason = notice?.reason ?? 'ai_error'
         if (current && current.status !== 'ai_handling') {
-          await send(current.status === 'closed' ? 'closed' : 'handoff', { runId: run.id, noticeItemId: `handoff:${run.id}`, lastSeq: Number(current.last_seq), handling: handling(current.status), ...(reason === 'ai_error' ? { reason } : { handoffNotice: handoffNotice(reason, noticePart?.rule?.id) }) })
+          await send(current.status === 'closed' ? 'closed' : 'handoff', { runId: run.id, noticeItemId: notice?.kind === 'handoff' ? current.notice_id ?? undefined : undefined, lastSeq: Number(current.last_seq), handling: handling(current.status), ...(reason === 'ai_error' ? { reason } : notice?.kind === 'handoff' ? { handoffNotice: handoffNotice(reason, notice.rule?.id) } : {}) })
         }
         if (current?.status === 'ai_handling') await send('handoff_unavailable', { runId: run.id })
         await requestSchedule(event)

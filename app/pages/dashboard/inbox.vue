@@ -50,7 +50,7 @@ const selected = ref<string | null>(null)
 const detail = ref<InboxDetail | null>(null)
 function showSystemNotice(part: Content['parts'][number]) {
   return part.type === 'system_event' && ((part.kind === 'handoff' && part.reason !== 'ai_error')
-    || (part.reason === 'manual' && (part.kind === 'snoozed' || part.kind === 'closed')))
+    || (part.reason === 'manual' && ['takeover', 'snoozed', 'closed'].includes(part.kind)))
 }
 function handoffNotice(part: SystemEventPart) {
   const builtin = part.rule?.id
@@ -95,6 +95,14 @@ let pollingBusy = false
 const date = (value: string | null) => (value ? new Date(value).toLocaleString(locale.value) : '')
 const canReply = computed(() => !!detail.value && ['open', 'pending'].includes(detail.value.conversation.status))
 const isAiHandling = computed(() => detail.value?.conversation.status === 'ai_handling')
+const takeoverPending = computed(() => isAiHandling.value && !!detail.value?.conversation.takeoverPending)
+const takeoverFocusId = ref<string | null>(null)
+watch(canReply, async (available) => {
+  if (!available || takeoverFocusId.value !== selected.value) return
+  takeoverFocusId.value = null
+  await nextTick()
+  replyInput.value?.focus()
+})
 const canClose = computed(() => !!detail.value && detail.value.conversation.status !== 'closed')
 const statusHint = computed(() => {
   const conversation = detail.value?.conversation
@@ -176,12 +184,14 @@ async function loadFeedback(more = false) {
   feedbackTotal.value = data.pagination.total
 }
 function clearSelection() {
+  takeoverFocusId.value = null
   selected.value = null
   detail.value = null
   detailVersion++
 }
 
 async function open(id: string) {
+  if (id !== selected.value) takeoverFocusId.value = null
   detailVersion++
   selected.value = id
   detail.value = null
@@ -243,6 +253,10 @@ async function executeCommand(action: string, extra: Record<string, unknown> = {
     const row = rows.value.find((row) => row.id === id)
     if (row) Object.assign(row, result.conversation)
     if (id === selected.value && detail.value) detail.value.conversation = result.conversation
+    if (action === 'takeover' && id === selected.value && version === detailVersion) {
+      if (result.conversation.takeoverPending) takeoverFocusId.value = id
+      else { await nextTick(); replyInput.value?.focus() }
+    }
     if (action === 'reply') {
       drafts[id] = ''
       draftImages[id] = []
@@ -526,6 +540,7 @@ loading.value = false
                     <p class="mt-2 max-w-prose whitespace-normal break-words text-left">{{ locale === 'zh' && part.rule.scenarioZh ? part.rule.scenarioZh : part.rule.scenario }}</p>
                   </details>
                   <span v-else-if="part.kind === 'handoff'">{{ handoffNotice(part) }}</span>
+                  <span v-else-if="part.kind === 'takeover'">{{ t(item.author?.id && item.author.id === session?.user.id ? 'inbox.noticeTakeoverSelf' : 'inbox.noticeTakeover', { name: item.author?.name || t('widget.messageStaff') }) }}</span>
                   <span v-else>{{ t(part.kind === 'snoozed' ? 'inbox.noticeSnoozed' : 'inbox.noticeClosed', { name: item.author?.name || t('widget.messageStaff'), time: date(part.dueAt ?? null) }) }}</span>
                   <time :datetime="item.createdAt" class="text-[10px] opacity-75">{{ time(item.createdAt) }}</time>
                 </div>
@@ -563,10 +578,11 @@ loading.value = false
               <input ref="fileInput" type="file" accept="image/*" multiple class="hidden" :disabled="!canReply || sending || uploading" @change="pickFiles">
               <Button type="button" variant="ghost" size="icon" class="hover:bg-secondary/50 hover:text-foreground dark:hover:bg-secondary/50 size-8 text-muted-foreground" :disabled="!canReply || sending || uploading" :title="t('widget.attachImage')" :aria-label="t('widget.attachImage')" @click="fileInput?.click()"><Icon name="lucide:image" size="16" /></Button>
               <div class="flex items-center gap-2">
-                <span class="hidden whitespace-nowrap text-[10px] text-muted-foreground lg:inline">Enter</span>
-                <div class="inline-flex w-56 shrink-0 items-stretch rounded-md" :class="!canReply || sending || uploading || !sendable ? 'opacity-50' : ''" data-inbox-send>
-                  <Button type="submit" variant="default" size="sm" class="h-9 min-w-0 flex-1 gap-1.5 rounded-r-none text-xs disabled:opacity-100" :disabled="!canReply || sending || uploading || !sendable"><Icon :name="sending ? 'lucide:loader-2' : 'lucide:send'" size="14" :class="sending ? 'animate-spin' : ''" />{{ t(deliveryMode === 'immediate' ? 'inbox.deliveryImmediate' : 'inbox.deliveryAuto') }}</Button>
-                  <DropdownMenu>
+                <span v-if="canReply" class="hidden whitespace-nowrap text-[10px] text-muted-foreground lg:inline">Enter</span>
+                <div class="inline-flex w-56 shrink-0 items-stretch rounded-md" :class="canReply && (sending || uploading || !sendable) ? 'opacity-50' : ''" data-inbox-send>
+                  <Button v-if="isAiHandling" type="button" variant="default" size="sm" class="h-9 min-w-0 flex-1 gap-1.5 text-xs" :disabled="busy || takeoverPending" :aria-busy="activeAction === 'takeover' || takeoverPending" @click="command('takeover')"><Icon :name="activeAction === 'takeover' || takeoverPending ? 'lucide:loader-2' : 'lucide:message-square-reply'" size="14" :class="activeAction === 'takeover' || takeoverPending ? 'animate-spin' : ''" />{{ t(takeoverPending ? 'inbox.takeoverWaiting' : 'inbox.takeover') }}</Button>
+                  <Button v-else type="submit" variant="default" size="sm" class="h-9 min-w-0 flex-1 gap-1.5 rounded-r-none text-xs disabled:opacity-100" :disabled="!canReply || sending || uploading || !sendable"><Icon :name="sending ? 'lucide:loader-2' : 'lucide:send'" size="14" :class="sending ? 'animate-spin' : ''" />{{ t(deliveryMode === 'immediate' ? 'inbox.deliveryImmediate' : 'inbox.deliveryAuto') }}</Button>
+                  <DropdownMenu v-if="canReply">
                     <DropdownMenuTrigger as-child>
                       <Button type="button" variant="default" size="sm" class="h-9 w-8 rounded-l-none border-l border-primary-foreground/25 px-0 disabled:opacity-100" :disabled="!canReply || sending || uploading" :title="t('inbox.deliveryMode')" :aria-label="t('inbox.deliveryMode')"><Icon name="lucide:chevron-down" size="14" /></Button>
                     </DropdownMenuTrigger>

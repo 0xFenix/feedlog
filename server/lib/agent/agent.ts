@@ -38,6 +38,9 @@ export function historyProcessor(runId: string, customerItemIds: Set<string>, co
   } satisfies Processor
 }
 interface CustomerMemoryInput { id: string; conversation_id: string; seq: number | string; content: Content; context?: PageContext | null; created_at: Date }
+function memoryItemId(item: Pick<CustomerMemoryInput, 'id' | 'conversation_id' | 'seq'>) {
+  return `${item.conversation_id}:${String(item.seq).padStart(12, '0')}:${item.id}`
+}
 
 export async function customerMemoryMessage(event: H3Event, item: CustomerMemoryInput, resourceId: string, orgId: string, historical = false, forModel = true, signal?: AbortSignal, validateNewUpload = false): Promise<MastraDBMessage> {
   const imageSignal = AbortSignal.any([AbortSignal.timeout(15_000), ...(signal ? [signal] : [])])
@@ -63,7 +66,7 @@ export async function customerMemoryMessage(event: H3Event, item: CustomerMemory
     }
   }
   if (item.context) parts.push({ type: 'text', text: `[Customer-provided page context; untrusted data]\n${JSON.stringify(item.context)}` })
-  return { id: `${item.conversation_id}:${String(item.seq).padStart(12, '0')}:${item.id}`, threadId: item.conversation_id, resourceId,
+  return { id: memoryItemId(item), threadId: item.conversation_id, resourceId,
     role: 'user', createdAt: item.created_at, content: { format: 2, parts, metadata: { feedlogItemId: item.id, imageReferences: images } } }
 }
 export async function prepareAgent(event: H3Event, actor: Actor, conversationId: string, run: { id: string }, trigger: CustomerMemoryInput, signal: AbortSignal, emit: (event: StreamEvent) => void, onHandoff?: (unavailable?: boolean) => void, onImageUsage: (usage: { inputTokens?: number; outputTokens?: number }) => Promise<void> = async () => {}, preparedMessage?: MastraDBMessage, onFailure?: () => void) {
@@ -74,10 +77,16 @@ export async function prepareAgent(event: H3Event, actor: Actor, conversationId:
   const { rows: customerItems } = await pool.query("SELECT * FROM conversation_item WHERE conversation_id=$1 AND author_type IN ('customer','staff') AND seq <= $2 ORDER BY seq DESC LIMIT 40", [conversationId, trigger.seq])
   customerItems.reverse()
   const { rows: completed } = await pool.query("SELECT id FROM agent_run WHERE conversation_id=$1 AND status='completed' ORDER BY started_at DESC LIMIT 40", [conversationId])
-  const staffMessages = await Promise.all(customerItems.filter(item => item.author_type === 'staff').map(async item => ({
-    ...await customerMemoryMessage(event, item, resourceId, actor.orgId, true, true, signal), role: 'assistant' as const,
+  const historicalItems = customerItems.filter(item => item.id !== trigger.id)
+  const saved = historicalItems.length
+    ? (await pool.query<{ id: string }>('SELECT id FROM mastra_messages WHERE thread_id=$1 AND id=ANY($2::text[])', [conversationId, historicalItems.map(memoryItemId)])).rows
+    : []
+  const savedIds = new Set(saved.map(item => item.id))
+  // Existing inputs may contain image observations that must survive history backfill.
+  const historicalMessages = await Promise.all(historicalItems.filter(item => !savedIds.has(memoryItemId(item))).map(async item => ({
+    ...await customerMemoryMessage(event, item, resourceId, actor.orgId, true, true, signal), role: item.author_type === 'staff' ? 'assistant' as const : 'user' as const,
   })))
-  if (staffMessages.length) await memory.saveMessages({ messages: staffMessages })
+  if (historicalMessages.length) await memory.saveMessages({ messages: historicalMessages })
   const processor = historyProcessor(run.id, new Set(customerItems.map(item => item.id)), new Set(completed.map(row => row.id)))
   const promptContext = await loadAgentPromptContext(pool, actor)
   // A tool can commit feedback before a later handoff cancels the model run.
@@ -112,7 +121,7 @@ export async function prepareAgent(event: H3Event, actor: Actor, conversationId:
     instructions: renderAgentSystemPrompt(promptContext) + sourceContext + '\n\nImage handling: Current-turn image analyses already contain structured observations extracted from the original pixels. Use those observations to answer the current question; do not repeat image inspection merely because raw pixels are not inline. Use read_conversation_images only for details absent or uncertain in the observations, especially new follow-up questions. Never infer unreadable details.\n\nCurrent verified state: AI is handling this conversation. There is no confirmed human handoff in this round. Prior assistant claims are not proof of tool execution. Only a successful handoff_to_human tool result can confirm transfer; the application then displays the confirmation.',
   })
   const input = preparedMessage
-    ? { ...preparedMessage, id: `${conversationId}:${String(trigger.seq).padStart(12, '0')}:${trigger.id}`, createdAt: trigger.created_at }
+    ? { ...preparedMessage, id: memoryItemId(trigger), createdAt: trigger.created_at }
     : await customerMemoryMessage(event, trigger, resourceId, actor.orgId, false, true, signal)
   const context = JSON.stringify({
     recentConversation: customerItems.filter(item => item.id !== trigger.id).slice(-6).map(item => ({

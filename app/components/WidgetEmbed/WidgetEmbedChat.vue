@@ -323,7 +323,7 @@ async function submit(input: ChatInput) {
           transient.value = ''
         }
         if (name === 'handoff' || name === 'closed') {
-          if (name === 'handoff' && data.reason !== 'ai_error' && !items.value.some(item => item.id === data.noticeItemId)) {
+          if (name === 'handoff' && data.noticeItemId && data.reason !== 'ai_error' && !items.value.some(item => item.id === data.noticeItemId)) {
             // The event confirms persistence; render it before the history fetch.
             // Reusing its ID lets history update the same bubble without a gap.
             items.value.push({
@@ -338,6 +338,12 @@ async function submit(input: ChatInput) {
           finished = true
           clearTimeout(timeout)
           scrollToBottom()
+        }
+        if (name === 'superseded') {
+          transient.value = ''
+          failure.value = ''
+          finished = true
+          clearTimeout(timeout)
         }
         if (name === 'handoff_unavailable' || (name === 'error' && data.code === 'support_unavailable')) {
           runs.value = runs.value.map(run => run.status === 'running' ? { ...run, status: 'failed', error: 'support_unavailable' } : run)
@@ -532,7 +538,7 @@ async function closeArticle() {
       </div>
     </template>
     <div v-if="transient" class="max-w-[82%] rounded-lg rounded-bl-sm border border-border bg-card px-3 py-2.5 text-[13.5px] leading-normal"><WidgetEmbedMarkdown :text="transient" /></div>
-    <div v-else-if="handlingMode === 'ai' && busy && !awaitingRun" role="status" :aria-label="t('widget.thinking')" class="flex justify-start">
+    <div v-else-if="handlingMode === 'ai' && latestRun?.status === 'running' && !awaitingRun" role="status" :aria-label="t('widget.thinking')" class="flex justify-start">
       <div class="px-3.5 py-2.5 rounded-lg rounded-bl-sm bg-card border border-border text-xs text-muted-foreground flex items-center gap-1.5">
         <span class="flex items-center gap-1" aria-hidden="true">
           <span v-for="n in 3" :key="n" class="w-1 h-1 rounded-full bg-current opacity-40 typing-dot" :style="{ animationDelay: `${(n - 1) * 0.16}s` }" />
