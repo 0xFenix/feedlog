@@ -19,10 +19,11 @@ export type HandoffRule = z.infer<typeof handoffRule>
 export const systemEventPart = z
   .object({
     type: z.literal('system_event'),
-    kind: z.enum(['handoff', 'reopened', 'customer_resumed', 'priority_changed', 'snoozed', 'resumed', 'closed']),
+    kind: z.enum(['handoff', 'takeover_requested', 'takeover', 'reopened', 'customer_resumed', 'priority_changed', 'snoozed', 'resumed', 'closed']),
     reason: z.enum([...handoffReason.options, 'ai_error', 'manual', 'timeout', 'customer_message']),
     fromStatus: inboxStatus,
     toStatus: inboxStatus,
+    runId: z.uuid().optional(),
     rule: handoffRule.optional(),
     dueAt: z.iso.datetime().optional(),
     fromPriority: z.enum(['normal', 'high']).optional(),

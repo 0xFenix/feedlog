@@ -12,6 +12,20 @@ test('Missing-AI handoffs stay hidden when the customer reloads history', () => 
   assert.equal(publicItem(handoff('ai_error')), null)
 })
 
+test('manual takeover records stay internal when the customer reloads history', () => {
+  const row = handoff('manual')
+  row.id = 'cmd:manual-takeover'
+  row.content.parts[0]!.kind = 'takeover'
+  assert.equal(publicItem(row), null)
+})
+
+test('a pending takeover is internal and does not announce human handling before AI finishes', () => {
+  const row = handoff('manual')
+  row.content.parts[0]!.kind = 'takeover_requested'
+  row.content.parts[0]!.toStatus = 'ai_handling'
+  assert.equal(publicItem(row), null)
+})
+
 test('requested and rule handoffs keep their existing customer notice', () => {
   for (const reason of ['user_requested', 'support_rule']) {
     assert.equal(publicItem(handoff(reason))?.notice, 'handoff')
