@@ -14,7 +14,7 @@ function openPostDetail(item: PostListItem) {
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col min-w-0 max-h-[calc(100vh-5rem)] min-h-[500px]">
+  <div class="flex-auto flex flex-col min-w-0 h-[calc(100vh-5rem)] min-h-[500px]">
     <!-- Title area -->
     <div class="pb-3 md:pb-6">
       <div class="flex items-baseline gap-3">
@@ -24,7 +24,7 @@ function openPostDetail(item: PostListItem) {
     </div>
 
     <!-- Board area -->
-    <div class="flex-1 overflow-x-auto overflow-y-hidden min-h-[400px]">
+    <div class="flex-1 flex overflow-x-auto overflow-y-hidden min-h-[400px]">
       <RoadmapKanban ref="kanbanRef" @open-detail="openPostDetail" />
     </div>
   </div>

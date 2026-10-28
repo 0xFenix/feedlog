@@ -77,7 +77,7 @@ function openPostDetail(item: PostListItem) {
   </div>
 
   <!-- Board area -->
-  <div class="flex-1 min-h-0 overflow-x-auto overflow-y-hidden p-6">
+  <div class="flex-1 min-h-0 flex overflow-x-auto overflow-y-hidden p-6">
     <RoadmapKanban ref="kanbanRef" :board-id="activeBoardId" editable @open-detail="openPostDetail" @add="handleAdd" />
   </div>
 
