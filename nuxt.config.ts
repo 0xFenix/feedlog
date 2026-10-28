@@ -119,7 +119,7 @@ export default defineNuxtConfig({
   },
   i18n: {
     strategy: 'prefix_except_default',
-    defaultLocale: 'en',
+    defaultLocale: 'vi',
     vueI18n: 'i18n.config.ts',
     detectBrowserLanguage: {
       useCookie: true,
@@ -127,6 +127,7 @@ export default defineNuxtConfig({
       redirectOn: 'root',
     },
     locales: [
+      { code: 'vi', language: 'vi-VN', name: 'Tiếng Việt', file: 'vi.json' },
       { code: 'en', language: 'en-US', name: 'English', file: 'en.json' },
       { code: 'zh', language: 'zh-CN', name: '中文', file: 'zh.json' },
     ],
