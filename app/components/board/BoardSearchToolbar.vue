@@ -98,9 +98,9 @@ defineExpose({ reset })
 
     <div ref="controlsRow" class="fl-rightbar flex items-center relative">
       <Transition name="fl-controls">
-        <div v-if="!searchOpen" class="flex items-center gap-3">
+        <div v-if="!searchOpen" class="fl-controls-group flex items-center gap-3">
           <BoardStatusPicker v-model="statusFilter" />
-          <div class="flex bg-border/50 p-1 rounded-lg">
+          <div class="fl-sort flex bg-border/50 p-1 rounded-lg">
             <button
               class="px-4 py-1.5 rounded-[12px] text-sm font-medium transition-colors"
               :class="sortBy === 'top'
@@ -135,7 +135,7 @@ defineExpose({ reset })
       <Transition name="fl-newreq">
         <Button
           v-show="!searchOpenMobile"
-          class="h-10 px-4 rounded-lg text-[15px] font-heading font-semibold"
+          class="fl-newreq-btn h-10 px-4 rounded-lg text-[15px] font-heading font-semibold"
           data-fdl-action="feedback_composer_open"
           data-fdl-source="toolbar"
           @click="emit('new-request')"
@@ -308,6 +308,37 @@ defineExpose({ reset })
   .fl-rightbar {
     gap: 0.5rem;
     min-height: 40px;
+    flex-wrap: wrap;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .fl-controls-group {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: 100%;
+    gap: 0.5rem;
+    justify-content: space-between;
+  }
+  .fl-controls-group > .fl-toolbtn,
+  .fl-controls-group > button {
+    flex: none;
+  }
+  .fl-sort {
+    min-width: 0;
+    flex: none;
+    max-width: 100%;
+  }
+  .fl-sort > button {
+    padding-left: 12px;
+    padding-right: 12px;
+    white-space: nowrap;
+  }
+  .fl-newreq-btn {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    justify-content: center;
   }
   .fl-toolbtn--search {
     width: 40px;
