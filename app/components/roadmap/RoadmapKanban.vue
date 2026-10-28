@@ -449,13 +449,13 @@ function removeItem(postId: string) {
 </script>
 
 <template>
-  <div class="flex gap-6 h-full">
+  <div class="flex gap-6 h-full min-h-0">
     <div
       v-for="col in columns"
       :key="col.id"
       :ref="(el) => setColumnRef(col.id, el)"
       :data-status="col.id"
-      class="flex-1 flex flex-col min-w-[260px] md:min-w-0 kanban-column transition-all duration-200"
+      class="flex-1 flex flex-col min-w-[260px] md:min-w-0 min-h-0 kanban-column transition-all duration-200"
       :class="{
         'ring-2 ring-primary/50': dropTargetStatus === col.id,
       }"
@@ -482,7 +482,7 @@ function removeItem(postId: string) {
       <div
         v-if="col.items.length || ghostPreview?.status === col.id || pendingDrop?.toStatus === col.id"
         :ref="(el) => setScrollableRef(col.id, el)"
-        class="kanban-scroll flex-1 overflow-y-auto pr-1"
+        class="kanban-scroll flex-1 min-h-0 overflow-y-auto pr-1"
       >
         <TransitionGroup
           name="kanban-card"
@@ -566,11 +566,17 @@ function removeItem(postId: string) {
   background-color: color-mix(in oklab, var(--foreground) 5%, transparent);
   border-radius: 16px;
   padding: 12px;
+  min-height: 0;
+  max-height: 100%;
 }
 
 .kanban-scroll {
+  min-height: 0;
   scrollbar-width: thin;
   scrollbar-color: color-mix(in oklab, var(--foreground) 22%, transparent) transparent;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
 }
 .kanban-scroll::-webkit-scrollbar {
   width: 6px;
