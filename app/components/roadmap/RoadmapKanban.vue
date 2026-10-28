@@ -576,7 +576,10 @@ function removeItem(postId: string) {
   scrollbar-color: color-mix(in oklab, var(--foreground) 22%, transparent) transparent;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-y: contain;
-  touch-action: pan-y;
+  /* pan-x must stay allowed: horizontal swipes that start on a card intersect
+     touch-action up the ancestor chain, and pan-y alone would forbid the
+     gesture from ever reaching the board-level horizontal scroller. */
+  touch-action: pan-x pan-y;
 }
 .kanban-scroll::-webkit-scrollbar {
   width: 6px;
