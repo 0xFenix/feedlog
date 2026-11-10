@@ -12,10 +12,11 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 16px;
-  --radius-xl: 24px;
+  /* A deployment sets --theme-radius-* on :root to change the corner sizes. */
+  --radius-sm: var(--theme-radius-sm, 4px);
+  --radius-md: var(--theme-radius-md, 8px);
+  --radius-lg: var(--theme-radius-lg, 16px);
+  --radius-xl: var(--theme-radius-xl, 24px);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -209,4 +210,47 @@
 .md-editor-preview.md-editor-preview :is(h1, h2, h3, h4, h5, h6, th, td) {
   word-break: normal;
   overflow-wrap: anywhere;
+}
+
+
+/* Quiet native scrollbars for navigation, feedback, and onboarding surfaces. */
+.scrollbar-subtle {
+  --subtle-scrollbar-thumb: color-mix(in oklab, var(--foreground) 22%, transparent);
+  --subtle-scrollbar-thumb-hover: color-mix(in oklab, var(--foreground) 34%, transparent);
+  scrollbar-width: thin;
+  scrollbar-color: var(--subtle-scrollbar-thumb) transparent;
+}
+
+/* Opaque thumbs remain visible over a transparent dialog's backdrop. */
+.scrollbar-subtle.scrollbar-contrast {
+  --subtle-scrollbar-thumb: color-mix(in oklab, var(--foreground) 35%, var(--background));
+  --subtle-scrollbar-thumb-hover: color-mix(in oklab, var(--foreground) 50%, var(--background));
+}
+
+@supports selector(::-webkit-scrollbar) {
+  /* Standard scrollbar properties override Chromium's custom scrollbar width. */
+  .scrollbar-subtle {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
+  .scrollbar-subtle::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-subtle::-webkit-scrollbar-track,
+  .scrollbar-subtle::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  .scrollbar-subtle::-webkit-scrollbar-thumb {
+    background-color: var(--subtle-scrollbar-thumb);
+    border-radius: 999px;
+  }
+  .scrollbar-subtle::-webkit-scrollbar-thumb:hover {
+    background-color: var(--subtle-scrollbar-thumb-hover);
+  }
+  .scrollbar-subtle::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+  }
 }

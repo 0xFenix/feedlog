@@ -1,5 +1,6 @@
 import { watchRun } from './run-monitor'
 import { agentTiming } from './timing'
+import { resolveAgentMaxSteps } from './config'
 import { AgentDependencyTimeout } from './dependency-timeout'
 import { HandoffProtocolError, handoffTextGate } from './handoff-protocol'
 import { createRunActivity } from './run-activity'
@@ -125,7 +126,7 @@ export async function streamAgentReply(event: H3Event, actor: Actor, options: { 
       const modelSignal = AbortSignal.any([signal, modelController.signal])
       const output = await prepared.agent.stream([prepared.input], {
         runId: run.id, memory: { thread: id, resource: prepared.resourceId, options: { lastMessages: prepared.historySize } },
-        maxSteps: 12, toolCallConcurrency: 1, abortSignal: modelSignal, onError: error => { failed = true; executionError = error }, onAbort: () => { failed = true },
+        maxSteps: resolveAgentMaxSteps(process.env.AGENT_MAX_STEPS), toolCallConcurrency: 1, abortSignal: modelSignal, onError: error => { failed = true; executionError = error }, onAbort: () => { failed = true },
         onStepFinish: step => recordUsage(step.usage),
       })
       const gate = handoffTextGate()
@@ -215,7 +216,7 @@ export async function streamAgentReply(event: H3Event, actor: Actor, options: { 
         const notice = noticePart?.type === 'system_event' ? noticePart : undefined
         const reason = notice?.reason ?? 'ai_error'
         if (current && current.status !== 'ai_handling') {
-          await send(current.status === 'closed' ? 'closed' : 'handoff', { runId: run.id, noticeItemId: notice?.kind === 'handoff' ? current.notice_id ?? undefined : undefined, lastSeq: Number(current.last_seq), handling: handling(current.status), ...(reason === 'ai_error' ? { reason } : notice?.kind === 'handoff' ? { handoffNotice: handoffNotice(reason, notice.rule?.id) } : {}) })
+          await send(current.status === 'closed' ? 'closed' : 'handoff', { runId: run.id, noticeItemId: notice?.kind === 'handoff' ? current.notice_id ?? undefined : undefined, lastSeq: Number(current.last_seq), handling: handling(current.status), ...(reason === 'ai_error' ? { reason } : notice?.kind === 'handoff' ? { handoffNotice: handoffNotice(reason, notice.rule?.id), customerNotice: notice.customerNotice } : {}) })
         }
         if (current?.status === 'ai_handling') await send('handoff_unavailable', { runId: run.id })
         await requestSchedule(event)

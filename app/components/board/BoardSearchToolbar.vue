@@ -1,78 +1,94 @@
 <script setup lang="ts">
-import { useMediaQuery } from '@vueuse/core'
-const q = defineModel<string>({ default: '' })
-const sortBy = defineModel<'top' | 'recent'>('sort', { default: 'recent' })
-const statusFilter = defineModel<BoardStatusFilter>('status', { default: 'active' })
-const emit = defineEmits<{ 'new-request': [] }>()
+import { useMediaQuery } from "@vueuse/core";
+const q = defineModel<string>({ default: "" });
+const sortBy = defineModel<"top" | "recent">("sort", { default: "recent" });
+const statusFilter = defineModel<BoardStatusFilter>("status", {
+  default: "active",
+});
+const emit = defineEmits<{ "new-request": [] }>();
 
-const searchOpen = ref(false)
-const searchInput = ref<HTMLInputElement | null>(null)
-const rawQuery = ref('')
+const searchOpen = ref(false);
+const searchInput = ref<HTMLInputElement | null>(null);
+const rawQuery = ref("");
 
-const isMobile = useMediaQuery('(max-width: 639.98px)')
-const searchOpenDesktop = computed(() => searchOpen.value && !isMobile.value)
-const searchOpenMobile = computed(() => searchOpen.value && isMobile.value)
-const searchActive = computed(() => rawQuery.value.trim().length > 0)
-let searchTimer: ReturnType<typeof setTimeout> | null = null
+const isMobile = useMediaQuery("(max-width: 639.98px)");
+const searchOpenDesktop = computed(() => searchOpen.value && !isMobile.value);
+const searchOpenMobile = computed(() => searchOpen.value && isMobile.value);
+const searchActive = computed(() => rawQuery.value.trim().length > 0);
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
-const searchTrigger = ref<HTMLElement | null>(null)
-const controlsRow = ref<HTMLElement | null>(null)
-const clipLeft = ref('50%')
-const clipRight = ref('50%')
-const mobileClip = computed(() => ({ '--fl-clip-left': clipLeft.value, '--fl-clip-right': clipRight.value }))
+const searchTrigger = ref<HTMLElement | null>(null);
+const controlsRow = ref<HTMLElement | null>(null);
+const clipLeft = ref("50%");
+const clipRight = ref("50%");
+const mobileClip = computed(() => ({
+  "--fl-clip-left": clipLeft.value,
+  "--fl-clip-right": clipRight.value,
+}));
 
 // Debounce the input and EMIT it (page owns the fetch). Emptying emits '' so the
 // page's single q-watch restores the board list — no double-fetch, no programmaticClear.
 watch(rawQuery, () => {
-  if (searchTimer) clearTimeout(searchTimer)
-  if (!rawQuery.value.trim()) { q.value = ''; return }
-  searchTimer = setTimeout(() => { q.value = rawQuery.value.trim() }, 250)
-})
+  if (searchTimer) clearTimeout(searchTimer);
+  if (!rawQuery.value.trim()) {
+    q.value = "";
+    return;
+  }
+  searchTimer = setTimeout(() => {
+    q.value = rawQuery.value.trim();
+  }, 250);
+});
 
 function openSearch() {
   if (isMobile.value && searchTrigger.value && controlsRow.value) {
-    const t = searchTrigger.value.getBoundingClientRect()
-    const b = controlsRow.value.getBoundingClientRect()
-    clipLeft.value = `${Math.max(0, Math.round(t.left - b.left))}px`
-    clipRight.value = `${Math.max(0, Math.round(b.right - t.right))}px`
+    const t = searchTrigger.value.getBoundingClientRect();
+    const b = controlsRow.value.getBoundingClientRect();
+    clipLeft.value = `${Math.max(0, Math.round(t.left - b.left))}px`;
+    clipRight.value = `${Math.max(0, Math.round(b.right - t.right))}px`;
   }
-  searchOpen.value = true
+  searchOpen.value = true;
 }
 
 function onSearchRevealed() {
-  if (searchOpen.value) searchInput.value?.focus()
+  if (searchOpen.value) searchInput.value?.focus();
 }
 
 function clearSearch() {
-  if (searchTimer) clearTimeout(searchTimer)
-  rawQuery.value = ''
-  searchInput.value?.focus()
+  if (searchTimer) clearTimeout(searchTimer);
+  rawQuery.value = "";
+  searchInput.value?.focus();
 }
 
 function closeSearch() {
-  if (searchTimer) clearTimeout(searchTimer)
-  rawQuery.value = ''
-  searchOpen.value = false
+  if (searchTimer) clearTimeout(searchTimer);
+  rawQuery.value = "";
+  searchOpen.value = false;
 }
 
 function clearOrClose() {
-  if (searchActive.value) clearSearch()
-  else closeSearch()
+  if (searchActive.value) clearSearch();
+  else closeSearch();
 }
 
 function reset() {
-  if (searchTimer) clearTimeout(searchTimer)
-  rawQuery.value = ''
-  searchOpen.value = false
+  if (searchTimer) clearTimeout(searchTimer);
+  rawQuery.value = "";
+  searchOpen.value = false;
 }
-defineExpose({ reset })
+defineExpose({ reset });
 </script>
 
 <template>
-  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2">
+  <div
+    class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2"
+  >
     <Transition name="fl-left" mode="out-in" @after-enter="onSearchRevealed">
       <h2 v-if="!searchOpenDesktop" class="font-heading text-2xl font-bold">
-        {{ sortBy === 'top' ? $t('board.topRequests') : $t('board.recentRequests') }}
+        {{
+          sortBy === "top"
+            ? $t("board.topRequests")
+            : $t("board.recentRequests")
+        }}
       </h2>
       <div v-else class="fl-search">
         <Icon name="lucide:search" size="18" class="fl-search__icon" />
@@ -84,11 +100,13 @@ defineExpose({ reset })
           autocomplete="off"
           class="fl-search__input"
           @keydown.esc="closeSearch"
-        >
+        />
         <button
           type="button"
           class="fl-search__clear"
-          :aria-label="searchActive ? $t('board.clearSearch') : $t('board.closeSearch')"
+          :aria-label="
+            searchActive ? $t('board.clearSearch') : $t('board.closeSearch')
+          "
           @click="clearOrClose"
         >
           <Icon name="lucide:x" size="16" />
@@ -96,28 +114,38 @@ defineExpose({ reset })
       </div>
     </Transition>
 
-    <div ref="controlsRow" class="fl-rightbar flex items-center relative">
+    <div
+      ref="controlsRow"
+      class="fl-rightbar flex flex-wrap items-center relative"
+    >
       <Transition name="fl-controls">
-        <div v-if="!searchOpen" class="fl-controls-group flex items-center gap-3">
+        <div
+          v-if="!searchOpen"
+          class="fl-controls-group flex items-center gap-3"
+        >
           <BoardStatusPicker v-model="statusFilter" />
           <div class="fl-sort flex bg-border/50 p-1 rounded-lg">
             <button
               class="px-4 py-1.5 rounded-[12px] text-sm font-medium transition-colors"
-              :class="sortBy === 'top'
-                ? 'bg-card text-foreground shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'"
+              :class="
+                sortBy === 'top'
+                  ? 'bg-card text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              "
               @click="sortBy = 'top'"
             >
-              {{ $t('board.sortTop') }}
+              {{ $t("board.sortTop") }}
             </button>
             <button
               class="px-4 py-1.5 rounded-[12px] text-sm font-medium transition-colors"
-              :class="sortBy === 'recent'
-                ? 'bg-card text-foreground shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'"
+              :class="
+                sortBy === 'recent'
+                  ? 'bg-card text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              "
               @click="sortBy = 'recent'"
             >
-              {{ $t('board.sortRecent') }}
+              {{ $t("board.sortRecent") }}
             </button>
           </div>
           <button
@@ -128,7 +156,7 @@ defineExpose({ reset })
             @click="openSearch"
           >
             <Icon name="lucide:search" size="18" />
-            <span class="hidden sm:inline">{{ $t('board.search') }}</span>
+            <span class="hidden sm:inline">{{ $t("board.search") }}</span>
           </button>
         </div>
       </Transition>
@@ -141,12 +169,16 @@ defineExpose({ reset })
           @click="emit('new-request')"
         >
           <Icon name="lucide:plus" size="18" />
-          {{ $t('board.newRequest') }}
+          {{ $t("board.newRequest") }}
         </Button>
       </Transition>
 
       <Transition name="fl-msearch" @after-enter="onSearchRevealed">
-        <div v-if="searchOpenMobile" class="fl-search fl-search--mobile" :style="mobileClip">
+        <div
+          v-if="searchOpenMobile"
+          class="fl-search fl-search--mobile"
+          :style="mobileClip"
+        >
           <Icon name="lucide:search" size="18" class="fl-search__icon" />
           <input
             ref="searchInput"
@@ -156,11 +188,13 @@ defineExpose({ reset })
             autocomplete="off"
             class="fl-search__input"
             @keydown.esc="closeSearch"
-          >
+          />
           <button
             type="button"
             class="fl-search__clear"
-            :aria-label="searchActive ? $t('board.clearSearch') : $t('board.closeSearch')"
+            :aria-label="
+              searchActive ? $t('board.clearSearch') : $t('board.closeSearch')
+            "
             @click="clearOrClose"
           >
             <Icon name="lucide:x" size="16" />
@@ -184,7 +218,9 @@ defineExpose({ reset })
   color: var(--muted-foreground);
   font-size: 14px;
   font-weight: 500;
-  transition: border-color 0.15s ease, color 0.15s ease;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease;
 }
 .fl-toolbtn:hover {
   border-color: var(--primary);
@@ -227,7 +263,9 @@ defineExpose({ reset })
   border: 1px solid var(--border);
   border-radius: 12px;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 .fl-search__input::placeholder {
   color: var(--muted-foreground);
@@ -248,7 +286,9 @@ defineExpose({ reset })
   height: 26px;
   border-radius: 8px;
   color: var(--muted-foreground);
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
 }
 .fl-search__clear:hover {
   background: var(--secondary);
@@ -361,7 +401,9 @@ defineExpose({ reset })
 
 .fl-msearch-enter-active,
 .fl-msearch-leave-active {
-  transition: clip-path 0.24s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.2s ease;
+  transition:
+    clip-path 0.24s cubic-bezier(0.22, 0.61, 0.36, 1),
+    opacity 0.2s ease;
 }
 .fl-msearch-enter-to,
 .fl-msearch-leave-from {
@@ -376,8 +418,9 @@ defineExpose({ reset })
 }
 
 .fl-newreq-enter-active {
-  transition: clip-path 0.13s cubic-bezier(0.22, 0.61, 0.36, 1),
-              opacity 0.1s ease;
+  transition:
+    clip-path 0.13s cubic-bezier(0.22, 0.61, 0.36, 1),
+    opacity 0.1s ease;
 }
 .fl-newreq-enter-to {
   clip-path: inset(0 0 0 0);
@@ -388,8 +431,9 @@ defineExpose({ reset })
 }
 
 .fl-newreq-leave-active {
-  transition: clip-path 0.18s cubic-bezier(0.22, 0.61, 0.36, 1),
-              opacity 0.14s ease;
+  transition:
+    clip-path 0.18s cubic-bezier(0.22, 0.61, 0.36, 1),
+    opacity 0.14s ease;
 }
 .fl-newreq-leave-from {
   clip-path: inset(0 0 0 0);
